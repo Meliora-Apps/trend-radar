@@ -11,7 +11,7 @@ import { addDays } from '../src/util/dates.js';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'tr-'));
 
-function fakeApple({ failSuggest = () => false } = {}) {
+function fakeApple({ failSuggest = () => false, failSearch = false } = {}) {
   const counter = makeCounter();
   const calls = { suggest: [], topApps: [], chart: 0 };
   return {
@@ -24,6 +24,7 @@ function fakeApple({ failSuggest = () => false } = {}) {
     }),
     topApps: (t) => counter.track(async () => {
       calls.topApps.push(t);
+      if (failSearch) throw new Error('HTTP 403 (search)');
       return [1, 2, 3, 4, 5].map((id) => ({ id, name: `A${id}`, genreId: 6003, subgenreId: null, ratings: 100, stars: 4, releaseDate: '2020-01-01' }));
     }),
     newFeed: () => counter.track(async () => []),
@@ -187,4 +188,16 @@ test('nicheAppIds: app-urile din nisele calde, cele cu scor mare primele, cu lim
   ]);
   assert.deepEqual(nicheAppIds({ dates, scores }, index), [1, 2, 3, 4]);
   assert.deepEqual(nicheAppIds({ dates, scores }, index, 2), [1, 2]);
+});
+
+test('runCountry: Apple blocheaza cautarea la clasificare -> cuvintele zilei raman, ziua e completa', async () => {
+  const dir = tmp();
+  const apple = fakeApple({ failSearch: true });
+  const s = await runCountry({
+    country: 'US', date: '2026-10-12', dataDir: dir, apple, log: () => {},
+    budget: { prefixes: prefixesFor('US').slice(0, 30), chartGenres: [] },
+  });
+  assert.equal(s.complete, true);
+  assert.equal(readJsonGz(dayPath(dir, '2026-10-12', 'US')).complete, true);
+  assert.deepEqual(readJsonGz(classifyPath(dir, '2026-10-12', 'US')), {});
 });
