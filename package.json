@@ -4,11 +4,24 @@
   "private": true,
   "type": "module",
   "description": "Trend Radar ASO: cuvinte-cheie noi / in crestere din App Store (US, GB, DE, FR, IT, ES)",
-  "engines": { "node": ">=22.13" },
+  "engines": {
+    "node": ">=22.13"
+  },
   "scripts": {
     "test": "node --test",
     "collect": "node src/collect/cli.js",
     "finalize": "node src/collect/finalize.js",
-    "start": "node src/local/start.js"
+    "start": "node src/local/start.js",
+    "web": "vite",
+    "build": "vite build",
+    "publish-online": "node src/export/publish.js"
+  },
+  "devDependencies": {
+    "vite": "^8.3.5"
+  },
+  "dependencies": {
+    "@auth/core": "^0.41.3",
+    "@convex-dev/auth": "^0.0.96",
+    "convex": "^1.49.0"
   }
 }

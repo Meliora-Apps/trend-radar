@@ -618,7 +618,7 @@ export function makeViews(db) {
 
   return {
     view, themeView, termView, suggestTerms, appKeywords, newApps, appRanks, nicheView, breakoutView, changesView, appExtra, termApps,
-    categories, status,
+    categories, status, bigOf, velocity,
     invalidate: () => { version++; cache.clear(); velCache.clear(); },
   };
 }

@@ -10,14 +10,13 @@ import { makeRetry } from '../apple/net.js';
 import { genreName } from '../apple/genres.js';
 import { keywordSource } from '../metrics/appwords.js';
 import { summarizeReviews } from '../metrics/reviews.js';
+import { toCsv } from './csv.js';
 
 const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
 const STALE_HOURS = 48;
 
-const CSV_COLS = ['country', 'term', 'score', 'delta', 'then', 'categoryName', 'subgenreName', 'difficulty', 'origin', 'confirmed', 'seenDays', 'ofDays', 'firstSeen'];
-const csvCell = (v) => (v == null ? '' : /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
-export const toCsv = (rows) => [CSV_COLS.join(','), ...rows.map((r) => CSV_COLS.map((c) => csvCell(r[c])).join(','))].join('\n');
+export { toCsv };
 
 const LOOKUP_CHUNK = 100;
 const NICHE_REVIEW_APPS = 5;

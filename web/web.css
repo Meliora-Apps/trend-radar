@@ -1,0 +1,8 @@
+/* Doar pentru varianta online: ecranul de logare. */
+body.locked > :not(.login) { display: none !important; }
+body.locked { display: block; }
+.login { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+.login-card { max-width: 360px; width: 100%; padding: 28px 24px; display: flex; flex-direction: column; gap: 14px; text-align: center; }
+.login-card .brand { font-size: 26px; }
+.login-card button { padding: 12px; font-size: 15px; }
+.side-foot .who { margin-top: 8px; word-break: break-all; }

@@ -2,12 +2,13 @@ import { lineChart } from './chart.js';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const api = async (path, opts) => {
+// Varianta online (web/) inlocuieste cererile catre serverul local cu fisierele zilnice din Convex.
+const api = globalThis.TR_API ?? (async (path, opts) => {
   const r = await fetch(path, opts);
   const j = await r.json();
   if (!r.ok) throw new Error(j.error ?? r.statusText);
   return j;
-};
+});
 
 // ---------- tooltip "?" ----------
 const tipEl = $('#tip');
@@ -786,6 +787,11 @@ $('#content').addEventListener('click', (e) => {
   if (t) return navigate({ term: t, view: 'search', from: state.view });
   const appEl = e.target.closest('a[data-app]');
   if (appEl) navigate({ view: 'app', appId: Number(appEl.dataset.app), appCountry: appEl.dataset.appCountry, appKwAll: false, from: state.view });
+});
+$('#csv').addEventListener('click', (e) => {
+  if (!globalThis.TR_CSV) return;
+  e.preventDefault();
+  globalThis.TR_CSV($('#csv').href);
 });
 $('#refresh').addEventListener('click', async (e) => {
   const b = e.target; b.disabled = true; b.textContent = 'Se descarcă…';

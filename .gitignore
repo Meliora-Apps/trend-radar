@@ -1,4 +1,8 @@
-node_modules/
+
+.DS_Store
+.convex/
+.env.local
+dist/
 local.db
 local.db-*
-.DS_Store
+node_modules/
