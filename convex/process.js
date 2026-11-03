@@ -28,6 +28,7 @@ const UPLOADS = 8;
 const FILES_BATCH = 100;
 const CONTINUE_AFTER_MS = 5 * 60_000; // o parte noua a exportului incepe doar daca actiunea e mai tanara de atat
 const mb = () => `${Math.round(process.memoryUsage().rss / 1e6)} MB`;
+const freeMb = (dir) => { const s = fs.statfsSync(dir); return Math.round((s.bavail * s.bsize) / 1e6); };
 
 const blobOf = async (ctx, id) => {
   const b = await ctx.storage.get(id);
@@ -44,10 +45,10 @@ async function restoreDb(ctx, file) {
   return true;
 }
 
-async function saveDb(ctx, db, dir) {
-  const copy = path.join(dir, 'save.db');
-  fs.rmSync(copy, { force: true });
-  db.exec(`VACUUM INTO '${copy}'`);
+// Fara copie pe disc (discul temporar al actiunii e mic): jurnalul WAL se scrie in fisierul bazei,
+// apoi fisierul se comprima direct, in bucati.
+async function saveDb(ctx, db, file) {
+  db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
   const ids = [];
   let parts = [];
   let size = 0;
@@ -56,7 +57,7 @@ async function saveDb(ctx, db, dir) {
     ids.push(await store(ctx, Buffer.concat(parts, size)));
     parts = []; size = 0;
   };
-  await pipeline(fs.createReadStream(copy), createGzip({ level: 4 }), new Writable({
+  await pipeline(fs.createReadStream(file), createGzip({ level: 4 }), new Writable({
     async write(chunk, _, done) {
       try {
         parts.push(chunk); size += chunk.length;
@@ -66,8 +67,7 @@ async function saveDb(ctx, db, dir) {
     },
     async final(done) { try { await flush(); done(); } catch (e) { done(e); } },
   }));
-  const bytes = fs.statSync(copy).size;
-  fs.rmSync(copy, { force: true });
+  const bytes = fs.statSync(file).size;
   await ctx.runMutation(internal.store.setState, { name: 'db', storageIds: ids, value: { bytes } });
   return { chunks: ids.length, bytes };
 }
@@ -166,7 +166,7 @@ export const run = internalAction({
       const file = path.join(dir, 'calc.db');
       const restored = await restoreDb(ctx, file);
       const db = openDb(file);
-      log(restored ? `baza refacuta (${Math.round(fs.statSync(file).size / 1e6)} MB)` : 'baza noua (din arhiva)');
+      log(`${restored ? `baza refacuta (${Math.round(fs.statSync(file).size / 1e6)} MB)` : 'baza noua (din arhiva)'}, disc liber ${freeMb(dir)} MB`);
 
       const collected = await saveCollected(ctx, db, date, log);
       let imported = 0;
@@ -182,7 +182,7 @@ export const run = internalAction({
         const id = await store(ctx, Buffer.from(JSON.stringify(collectPlan(db, cc))), 'application/json');
         await ctx.runMutation(internal.store.setState, { name: `plan/${cc}`, storageIds: [id] });
       }
-      const saved = await saveDb(ctx, db, dir);
+      const saved = await saveDb(ctx, db, file);
       log(`baza salvata: ${Math.round(saved.bytes / 1e6)} MB in ${saved.chunks} bucati (${Math.round((Date.now() - started) / 1000)} s)`);
 
       // Starea colectarii, pentru interfata: tarile zilei colectate (sau, la o incarcare manuala, ultima zi din baza).
