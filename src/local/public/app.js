@@ -794,13 +794,13 @@ $('#csv').addEventListener('click', (e) => {
   globalThis.TR_CSV($('#csv').href);
 });
 $('#refresh').addEventListener('click', async (e) => {
-  const b = e.target; b.disabled = true; b.textContent = 'Se descarcă…';
+  const b = e.target; const label = b.textContent; b.disabled = true; b.textContent = 'Se încarcă…';
   try {
     const r = await api('/api/refresh', { method: 'POST' });
     if (r.warning) $('#notice').innerHTML = `<div class="notice">${esc(r.warning)}</div>`;
     viewCache.clear();
     await loadMeta(); await loadStatus(); await renderView(window.scrollY);
-  } catch (err) { showError(err); } finally { b.disabled = false; b.textContent = 'Descarcă date noi'; }
+  } catch (err) { showError(err); } finally { b.disabled = false; b.textContent = label; }
 });
 
 function showError(err) {
