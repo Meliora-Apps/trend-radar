@@ -1,5 +1,5 @@
-// Varianta online a API-ului local (src/local/server.js): aceleasi cai si aceleasi raspunsuri,
-// dar din fisierele exportate zilnic in Convex (src/export/build.js) + actiunile live catre Apple (convex/apple.js).
+// API-ul interfetei (cererile /api/... din src/local/public/app.js): raspunsurile vin
+// din fisierele exportate zilnic in Convex (src/export/build.js) + actiunile live catre Apple (convex/apple.js).
 import { COUNTRIES } from '../src/apple/clients.js';
 import { keywordSource } from '../src/metrics/appwords.js';
 import { saturated } from '../src/metrics/niche.js';

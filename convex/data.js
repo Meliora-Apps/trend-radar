@@ -31,23 +31,28 @@ export const urls = query({
   },
 });
 
-// ---- scrise doar de exportul din GitHub Actions (prin http.js, cu cheia INGEST_SECRET) ----
+// ---- scrise doar de calculul zilnic (process.js) ----
 
-export const addFile = internalMutation({
-  args: { gen: v.string(), key: v.string(), storageId: v.id('_storage') },
-  handler: async (ctx, a) => {
-    const old = await ctx.db.query('files').withIndex('by_gen_key', (q) => q.eq('gen', a.gen).eq('key', a.key)).unique();
-    if (old) { await ctx.storage.delete(old.storageId); await ctx.db.delete(old._id); }
-    await ctx.db.insert('files', a);
+export const addFiles = internalMutation({
+  args: { gen: v.string(), files: v.array(v.object({ key: v.string(), storageId: v.id('_storage') })) },
+  handler: async (ctx, { gen, files }) => {
+    for (const f of files) {
+      const old = await ctx.db.query('files').withIndex('by_gen_key', (q) => q.eq('gen', gen).eq('key', f.key)).unique();
+      if (old) { await ctx.storage.delete(old.storageId); await ctx.db.delete(old._id); }
+      await ctx.db.insert('files', { gen, ...f });
+    }
   },
 });
 
 // Trece pe generatia noua, apoi sterge (in loturi) fisierele generatiilor vechi.
 export const commit = internalMutation({
-  args: { gen: v.string(), expected: v.number() },
-  handler: async (ctx, { gen, expected }) => {
+  args: { gen: v.string() },
+  handler: async (ctx, { gen }) => {
+    // Generatia trebuie sa aiba toate fisierele de baza (meta + listele + cuvintele); altfel exportul e rupt.
     const n = (await ctx.db.query('files').withIndex('by_gen_key', (q) => q.eq('gen', gen)).collect()).length;
-    if (n < expected) throw new Error(`generatia ${gen} are ${n}/${expected} fisiere`);
+    for (const key of ['meta', 'terms', 'term/0', 'app/0']) {
+      if (!await ctx.db.query('files').withIndex('by_gen_key', (q) => q.eq('gen', gen).eq('key', key)).unique()) throw new Error(`generatia ${gen} n-are ${key}`);
+    }
     const cur = await current(ctx);
     const at = new Date().toISOString();
     if (cur) await ctx.db.patch(cur._id, { gen, at }); else await ctx.db.insert('state', { name: 'current', gen, at });

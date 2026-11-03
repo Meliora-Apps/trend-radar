@@ -11,10 +11,9 @@
     "test": "node --test",
     "collect": "node src/collect/cli.js",
     "finalize": "node src/collect/finalize.js",
-    "start": "node src/local/start.js",
     "web": "vite",
     "build": "vite build",
-    "publish-online": "node src/export/publish.js"
+    "upload": "node src/export/upload.js"
   },
   "devDependencies": {
     "vite": "^8.3.5"
