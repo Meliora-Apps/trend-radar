@@ -12,6 +12,7 @@ import vm from 'node:vm';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { pipeline } from 'node:stream/promises';
 import { Readable, Writable } from 'node:stream';
 import { gzipSync, gunzipSync, createGzip, createGunzip } from 'node:zlib';
@@ -32,17 +33,26 @@ const UPLOADS = 8;
 const FILES_BATCH = 100;
 const CONTINUE_AFTER_MS = 5 * 60_000; // o parte noua a exportului incepe doar daca actiunea e mai tanara de atat
 const mb = () => `${Math.round(process.memoryUsage().rss / 1e6)} MB`;
-// Node strange memoria nefolosita abia cand se apropie de limita lui (~3,6 GB aici), iar Convex opreste actiunea
-// mai devreme. Exportul are nevoie de ~400 MB: curatam noi, des (fiecare curatare ~0,2 s).
+// Convex poate opri o actiune Node care trece de 512 MB. Fiecare parte a exportului se calculeaza intr-un worker
+// cu memoria limitata (are nevoie de max ~250 MB, masurat): fara limita, Node strange memoria nefolosita abia
+// aproape de ~3,6 GB, iar la final worker-ul se inchide si elibereaza tot.
+const WORKER_HEAP_MB = 384;
+const WORKER_CREDIT = 16; // cate fisiere poate trimite worker-ul inainte sa astepte incarcarea lor
 v8.setFlagsFromString('--expose_gc');
 const gc = vm.runInNewContext('gc');
-const GC_EVERY = 32;
 // Un calcul oprit fortat (memorie, timp) nu-si sterge folderul temporar, iar discul e refolosit de la o actiune
 // la alta: la pornire stergem ce a ramas (ruleaza un singur calcul odata, vezi claimProcess).
-function cleanTmp() {
+// Tot asa raman si fisierele temporare ale SQLite (etilqs_*, tabelele temporare ale exportului).
+function cleanTmp(log) {
+  const left = [];
   for (const name of fs.readdirSync(os.tmpdir())) {
-    if (name.startsWith('tr-')) fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
+    const full = path.join(os.tmpdir(), name);
+    let size = 0;
+    try { size = fs.statSync(full).size; } catch {}
+    if (name.startsWith('tr-') || name.startsWith('etilqs_')) fs.rmSync(full, { recursive: true, force: true });
+    else left.push(`${name} ${Math.round(size / 1e6)}MB`);
   }
+  log(`disc temporar: raman ${left.slice(0, 12).join(', ') || 'nimic'}`);
 }
 const freeMb = (dir) => { const s = fs.statfsSync(dir); return Math.round((s.bavail * s.bsize) / 1e6); };
 
@@ -122,32 +132,71 @@ async function saveCollected(ctx, db, date, log) {
   return jobs.length ? status : null;
 }
 
-// Partile exportului, de la `part`, cat timp ajunge; intoarce urmatoarea parte (sau null daca s-a terminat).
-async function exportParts(ctx, db, { gen, part, cloud, started, log }) {
-  let i = part;
-  for (; i < EXPORT_PARTS.length; i++) {
-    if (i > part && Date.now() - started > CONTINUE_AFTER_MS) return i;
+// Worker-ul unei parti a exportului (acelasi fisier, pornit de exportPart): calculeaza fisierele si le trimite
+// pe rand; dupa WORKER_CREDIT fisiere asteapta confirmarea ca au fost incarcate (memoria nu se umple).
+if (!isMainThread && workerData?.trExport) {
+  const { file, part, cloud } = workerData;
+  let credit = WORKER_CREDIT;
+  let wake = null;
+  parentPort.on('message', () => { credit++; wake?.(); wake = null; });
+  (async () => {
+    const db = openDb(file);
+    for (const [key, buf] of exportFiles(db, { cloud, parts: [part], log: (m) => parentPort.postMessage({ log: m }) })) {
+      while (credit <= 0) await new Promise((r) => { wake = r; });
+      credit--;
+      const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length);
+      parentPort.postMessage({ key, ab }, [ab]);
+    }
+    db.close();
+    parentPort.postMessage({ done: true });
+    parentPort.close();
+  })().catch((err) => { throw err; });
+}
+
+// O parte a exportului, calculata in worker si incarcata de aici.
+function exportPart(ctx, { file, part, cloud, gen, log }) {
+  return new Promise((resolve, reject) => {
+    const w = new Worker(new URL(import.meta.url), { workerData: { trExport: true, file, part, cloud }, resourceLimits: { maxOldGenerationSizeMb: WORKER_HEAP_MB } });
     const pending = new Set();
     let batch = [];
+    let done = false;
+    let failure = null;
     const flush = async () => {
       if (!batch.length) return;
       const files = batch;
       batch = [];
       await ctx.runMutation(internal.data.addFiles, { gen, files });
     };
-    let n = 0;
-    gc();
-    for (const [key, buf] of exportFiles(db, { cloud, log, parts: [EXPORT_PARTS[i]] })) {
-      if (++n % GC_EVERY === 0) gc();
-      const p = store(ctx, buf).then(async (storageId) => {
-        batch.push({ key, storageId });
+    w.on('message', (m) => {
+      if (m.log) return log(m.log);
+      if (m.done) { done = true; return; }
+      const p = store(ctx, Buffer.from(m.ab)).then(async (storageId) => {
+        batch.push({ key: m.key, storageId });
         if (batch.length >= FILES_BATCH) await flush();
-      }).finally(() => pending.delete(p));
+        w.postMessage('ack');
+      }).catch((err) => { failure ??= err; w.terminate(); }).finally(() => pending.delete(p));
       pending.add(p);
-      if (pending.size >= UPLOADS) await Promise.race(pending);
-    }
-    await Promise.all(pending);
-    await flush();
+    });
+    w.on('error', (err) => { failure ??= err; });
+    w.on('exit', async (code) => {
+      try {
+        await Promise.all(pending);
+        if (failure) throw failure;
+        if (!done) throw new Error(`exportul ${part} s-a oprit (cod ${code})`);
+        await flush();
+        resolve();
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
+}
+
+// Partile exportului, de la `part`, cat timp ajunge; intoarce urmatoarea parte (sau null daca s-a terminat).
+async function exportParts(ctx, file, { gen, part, cloud, started, log }) {
+  for (let i = part; i < EXPORT_PARTS.length; i++) {
+    if (i > part && Date.now() - started > CONTINUE_AFTER_MS) return i;
+    await exportPart(ctx, { file, part: EXPORT_PARTS[i], cloud, gen, log });
     log(`${EXPORT_PARTS[i]} incarcate (${Math.round((Date.now() - started) / 1000)} s, ${mb()})`);
   }
   return null;
@@ -176,7 +225,7 @@ export const run = internalAction({
   handler: async (ctx, { date }) => {
     const token = crypto.randomUUID();
     if (!(await ctx.runMutation(internal.store.claimProcess, { date, token }))) return 'alt calcul ruleaza';
-    cleanTmp();
+    cleanTmp(console.log);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tr-'));
     const started = Date.now();
     const lines = [];
@@ -216,8 +265,9 @@ export const run = internalAction({
       await ctx.runMutation(internal.store.setState, { name: 'cloud', value: cloud });
 
       const gen = new Date().toISOString().replace(/[:.]/g, '-');
-      const next = await exportParts(ctx, db, { gen, part: 0, cloud, started, log });
       db.close();
+      gc();
+      const next = await exportParts(ctx, file, { gen, part: 0, cloud, started, log });
       keepLock = !(await afterExport(ctx, { date, token, gen, next, cloud, lines }));
       return lines.join('\n');
     } catch (err) {
@@ -235,7 +285,7 @@ export const resume = internalAction({
   args: { date: v.string(), token: v.string(), gen: v.string(), part: v.number(), cloud: v.any() },
   handler: async (ctx, { date, token, gen, part, cloud }) => {
     if (!(await ctx.runMutation(internal.store.claimProcess, { date, token }))) return 'alt calcul ruleaza';
-    cleanTmp();
+    cleanTmp(console.log);
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tr-'));
     const started = Date.now();
     const lines = [];
@@ -244,10 +294,8 @@ export const resume = internalAction({
     try {
       const file = path.join(dir, 'calc.db');
       if (!(await restoreDb(ctx, file))) throw new Error('lipseste copia bazei');
-      const db = openDb(file);
       log(`baza refacuta pentru export (${Math.round((Date.now() - started) / 1000)} s)`);
-      const next = await exportParts(ctx, db, { gen, part, cloud, started, log });
-      db.close();
+      const next = await exportParts(ctx, file, { gen, part, cloud, started, log });
       keepLock = !(await afterExport(ctx, { date, token, gen, next, cloud, lines }));
       return lines.join('\n');
     } catch (err) {

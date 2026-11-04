@@ -110,12 +110,15 @@ function* appShards(db, views, counter) {
   }
 }
 
-// Exportul are 3 parti, fiecare calculabila separat (in Convex o parte poate continua intr-o alta actiune).
-export const EXPORT_PARTS = ['lists', 'terms', 'apps'];
+// Exportul e impartit in pasi, fiecare calculabil separat (in Convex o actiune Node are max 512 MB si 10 minute,
+// deci exportul poate continua intr-o alta actiune): meta + liste, paginile cuvintelor in TERM_GROUPS grupe, app-urile.
+const TERM_GROUPS = 8;
+export const EXPORT_PARTS = ['lists', ...Array.from({ length: TERM_GROUPS }, (_, g) => `terms/${g}`), 'apps'];
 
 // Toate fisierele, pe rand ([cheie, gzip]): fiecare e calculat abia cand e cerut, deci memoria nu tine tot exportul.
 export function* exportFiles(db, { log = console.log, cloud = null, parts = EXPORT_PARTS } = {}) {
-  const views = makeViews(db);
+  // Listele: o tara odata in memorie; bucatile ei raman pe disc pentru lista ALL (vezi spill in views.js).
+  const views = makeViews(db, { spill: parts.includes('lists') });
   const gz = (obj) => gzipSync(Buffer.from(JSON.stringify(obj)), { level: 6 }); // 9 = de 2 ori mai lent pentru 5% mai mic
 
   if (parts.includes('lists')) {
@@ -127,26 +130,29 @@ export function* exportFiles(db, { log = console.log, cloud = null, parts = EXPO
       if (prev && cc !== prev && prev !== 'ALL') views.release(prev);
       prev = cc;
       yield [key, gz(fn(views))];
+      if (cc === 'ALL') for (const c of COUNTRIES) views.release(c);
     }
     views.forget();
-    for (const cc of COUNTRIES) views.release(cc);
     log(`liste: ${Date.now() - t} ms`);
   }
 
-  if (parts.includes('terms')) {
+  const groups = parts.filter((p) => p.startsWith('terms/')).map((p) => Number(p.split('/')[1]));
+  if (groups.length) {
     const t = Date.now();
     // Cuvintele vazute in zilele pastrate in baza (RETAIN.scores): cele disparute de mult nu mai au pagina.
     const since = db.prepare('SELECT MIN(date) d FROM scores').get().d ?? '';
     const terms = db.prepare('SELECT term FROM seen WHERE last_seen>=? GROUP BY term ORDER BY length(term), term').all(since).map((r) => r.term);
-    yield ['terms', gz(terms)];
+    if (groups.includes(0)) yield ['terms', gz(terms)];
     const byShard = Array.from({ length: TERM_SHARDS }, () => []);
     for (const term of terms) byShard[shardOf(term, TERM_SHARDS)].push(term);
+    let n = 0;
     for (let i = 0; i < TERM_SHARDS; i++) {
+      if (!groups.includes(i % TERM_GROUPS)) continue;
       const shard = {};
-      for (const term of byShard[i]) shard[term] = views.termView(term);
+      for (const term of byShard[i]) { shard[term] = views.termView(term); n++; }
       yield [`term/${i}`, gz(shard)];
     }
-    log(`cuvinte: ${terms.length} in ${Date.now() - t} ms`);
+    log(`cuvinte: ${n} in ${Date.now() - t} ms`);
   }
 
   if (parts.includes('apps')) {

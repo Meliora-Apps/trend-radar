@@ -70,7 +70,7 @@ const GAMES = 6014;
 const COMPANION_PUB = 100_000;
 
 // Cache pe tara, invalidat la fiecare import (versiune).
-export function makeViews(db) {
+export function makeViews(db, { spill = false } = {}) {
   // Cererile SQL pregatite o singura data (fiecare cerere pregatita tine memorie in SQLite pana e stearsa de GC).
   const stmts = new Map();
   const q = (sql) => {
@@ -95,11 +95,24 @@ export function makeViews(db) {
     return cache.get(key);
   };
   // Bucatile pe tara ale listelor: lista "ALL" le refoloseste pe cele ale tarilor (exportul le cere pe toate).
+  // spill: bucatile se scriu si pe disc (tabel temporar), ca lista ALL sa le poata reciti dupa ce memoria
+  // tarii a fost eliberata: in memorie sta doar tara curenta (exportul din Convex are max 512 MB).
   const memoCache = new Map();
+  let spillGet = null, spillPut = null;
+  if (spill) {
+    db.exec('DROP TABLE IF EXISTS temp.memo_spill; CREATE TEMP TABLE memo_spill (k TEXT PRIMARY KEY, v TEXT)');
+    spillGet = db.prepare('SELECT v FROM temp.memo_spill WHERE k=?');
+    spillPut = db.prepare('INSERT OR REPLACE INTO temp.memo_spill VALUES (?,?)');
+  }
   const memo = (key, fn) => {
     const k = `${key}:${version}`;
-    if (!memoCache.has(k)) memoCache.set(k, fn());
-    return memoCache.get(k);
+    if (memoCache.has(k)) return memoCache.get(k);
+    const saved = spillGet?.get(k);
+    if (saved) return JSON.parse(saved.v);
+    const value = fn();
+    memoCache.set(k, value);
+    spillPut?.run(k, JSON.stringify(value));
+    return value;
   };
 
   // Ritmul rating-urilor pe app, dintr-o singura citire (ultimele 14 zile de cifre):
@@ -787,6 +800,6 @@ export function makeViews(db) {
     invalidate: () => { version++; cache.clear(); velCache.clear(); memoCache.clear(); bigCache.clear(); },
     forget: () => memoCache.clear(), // dupa liste: bucatile pe tara nu mai trebuie
     // Dupa listele unei tari: seria si ritmurile ei nu mai trebuie (lista ALL foloseste doar bucatile deja calculate).
-    release: (cc) => { cache.delete(`${cc}:${version}`); velCache.delete(`${cc}:${version}`); },
+    release: (cc) => { cache.delete(`${cc}:${version}`); velCache.delete(`${cc}:${version}`); if (spill) memoCache.clear(); },
   };
 }
