@@ -40,6 +40,25 @@ export function parseSearch(json) {
   }));
 }
 
+// Cautarea pentru precomenzi (src/collect/steps.js, UPCOMING_TERMS): toate rezultatele (pana la 200), cu locul
+// in cautare; pastram doar app-urile cu data lansarii dupa `after` (inca la precomanda). `pub` = cele mai multe
+// rating-uri ale unui app al aceluiasi editor din aceeasi cautare (cat de mare e editorul).
+export function parseUpcoming(json, after) {
+  const results = json.results ?? [];
+  const pub = new Map();
+  for (const r of results) {
+    const k = r.artistId ?? r.sellerName;
+    pub.set(k, Math.max(pub.get(k) ?? 0, r.userRatingCount ?? 0));
+  }
+  return results.map((r, i) => ({ r, position: i + 1 }))
+    .filter(({ r }) => r.releaseDate && r.releaseDate.slice(0, 10) > after)
+    .map(({ r, position }) => ({
+      id: r.trackId, position, name: r.trackName ?? '', seller: r.sellerName ?? r.artistName ?? '',
+      genreId: Number(r.primaryGenreId), releaseDate: r.releaseDate.slice(0, 10), price: r.price ?? 0,
+      pub: pub.get(r.artistId ?? r.sellerName) ?? 0,
+    }));
+}
+
 export function parseChart(json) {
   let e = json?.feed?.entry;
   if (!e) return [];
@@ -173,6 +192,11 @@ export function makeAppleClient({
       const url = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}`
         + `&country=${country.toLowerCase()}&media=software&entity=software&limit=10&lang=en_us${fresh()}`;
       return call(heavy, 'search', url, {}, async (r) => parseSearch(await r.json()));
+    },
+    upcoming(term, country, after) {
+      const url = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}`
+        + `&country=${country.toLowerCase()}&media=software&entity=software&limit=200&lang=en_us${fresh()}`;
+      return call(heavy, 'search', url, {}, async (r) => parseUpcoming(await r.json(), after));
     },
     chart(country, type, genreId) {
       const url = `https://itunes.apple.com/${country.toLowerCase()}/rss/${type}/limit=100/genre=${genreId}/json`;

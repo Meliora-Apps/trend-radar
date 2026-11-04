@@ -6,9 +6,10 @@ import { CHART_TYPES, NEW_FEEDS } from '../apple/clients.js';
 import { CHART_GENRES } from '../apple/genres.js';
 import { scoreDay, scoreDayAdjusted, difficulty, categorize } from '../metrics/score.js';
 import { nicheStats } from '../metrics/niche.js';
-import { MAX_FAILURE_RATE, EXPAND_MAX, LOOKUP_BATCH, classificationQueue, lookupIds, grossingIds } from './steps.js';
+import { MAX_FAILURE_RATE, EXPAND_MAX, LOOKUP_BATCH, UPCOMING_TERMS, classificationQueue, lookupIds, grossingIds } from './steps.js';
 
-export const PHASES = ['base', 'expand', 'charts', 'feed', 'lookup', 'classify', 'done'];
+// Precomenzile (upcoming) dupa lookup: daca Apple blocheaza cautarea, se pierde doar clasificarea, ca pana acum.
+export const PHASES = ['base', 'expand', 'charts', 'feed', 'lookup', 'upcoming', 'classify', 'done'];
 export const CLASSIFY_MS = 3 * 3600_000;
 
 export const newJob = (country, date) => ({
@@ -18,7 +19,7 @@ export const newJob = (country, date) => ({
 
 // Lucrurile de facut in fiecare pas. `prep` = listele pregatite la trecerea in pas (vezi preparePhase).
 // Proba scurta (job.smoke): putine cereri din fiecare pas, ziua nu conteaza ca zi completa.
-const SMOKE = { base: 30, expand: 10, charts: 6, feed: 2, lookup: 2, classify: 20 };
+const SMOKE = { base: 30, expand: 10, charts: 6, feed: 2, lookup: 2, upcoming: 3, classify: 20 };
 
 export function phaseItems(job, prep) {
   const items = allItems(job, prep);
@@ -30,7 +31,7 @@ function allItems(job, prep) {
     case 'base': return prefixesFor(job.country);
     case 'charts': return CHART_GENRES.flatMap((genreId) => CHART_TYPES.map((type) => ({ genreId, type })));
     case 'feed': return NEW_FEEDS;
-    case 'expand': case 'classify': return prep ?? [];
+    case 'expand': case 'upcoming': case 'classify': return prep ?? [];
     case 'lookup': {
       const ids = prep?.ids ?? [];
       return Array.from({ length: Math.ceil(ids.length / LOOKUP_BATCH) }, (_, i) => ids.slice(i * LOOKUP_BATCH, (i + 1) * LOOKUP_BATCH));
@@ -41,7 +42,8 @@ function allItems(job, prep) {
 
 // Ce trebuie pregatit (o singura data) la intrarea in pas, din planul zilei si din ce s-a cules deja:
 //  expand:   inceputurile de extins (din plan), fara cele de baza;
-//  lookup:   app-urile de verificat (topuri + lansari noi + nisele calde din plan) si cele din topul incasarilor;
+//  lookup:   app-urile de verificat (topuri + lansari noi + nisele calde + precomenzile din plan) si cele din topul incasarilor;
+//  upcoming: cuvintele pentru precomenzi (cele fixe + numele jocurilor care fac bani, din plan);
 //  classify: coada de clasificare (cuvintele de azi, cele noi primele).
 export function preparePhase(job, { plan, parts }) {
   if (job.phase === 'expand') {
@@ -51,8 +53,9 @@ export function preparePhase(job, { plan, parts }) {
   if (job.phase === 'lookup') {
     const charts = parts.charts ?? [];
     const feedIds = (parts.feed ?? []).flatMap((f) => f.apps.map((a) => a.id));
-    return { ids: lookupIds(charts, [...feedIds, ...(plan?.nicheIds ?? [])]), grossing: [...grossingIds(charts)] };
+    return { ids: lookupIds(charts, [...feedIds, ...(plan?.nicheIds ?? []), ...(plan?.upcomingIds ?? [])]), grossing: [...grossingIds(charts)] };
   }
+  if (job.phase === 'upcoming') return plan?.upcomingTerms ?? UPCOMING_TERMS;
   if (job.phase === 'classify') {
     const suggest = [...(parts.base ?? []), ...(parts.expand ?? [])];
     const todayScores = scoreDay(suggest);
@@ -129,6 +132,8 @@ async function doItem(job, item, apple, grossing) {
       const results = await apple.appMeta(item, cc);
       return results.map((m) => ({ ...m, notes: grossing.has(m.id) ? m.notes : '' }));
     }
+    case 'upcoming':
+      return { term: item, apps: await apple.upcoming(item, cc, job.date) };
     case 'classify': {
       const apps = await apple.topApps(item, cc);
       return [item, {
@@ -144,13 +149,14 @@ async function doItem(job, item, apple, grossing) {
 }
 
 // Bucatile culese -> continutul fisierelor zilei (days + classify) si raspunsurile lookup (pentru apps/stats/changes).
-// parts: { base: [...], expand: [...], charts: [...], feed: [...], lookup: [[...], ...], classify: [[term, c], ...] }
+// parts: { base, expand, charts, feed, lookup: [[...], ...], upcoming: [{ term, apps }], classify: [[term, c], ...] }
 export function assembleDay(job, parts) {
   const suggest = [...(parts.base ?? []), ...(parts.expand ?? [])];
   return {
     day: {
       date: job.date, country: job.country, complete: !!job.keywordsOk, smoke: false,
       requests: job.requests, errors: job.failures, suggest, charts: parts.charts ?? [], newFeed: parts.feed ?? [],
+      upcoming: parts.upcoming ?? [],
     },
     classify: Object.fromEntries(parts.classify ?? []),
     lookup: (parts.lookup ?? []).flat(),

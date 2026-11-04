@@ -60,6 +60,11 @@ const HELP = {
   estimate: 'Estimare din rating-urile pe zi: descărcări pe zi (~70 pe rating) și bani pe lună dacă ar câștiga cât media aplicațiilor cu abonament (0,34 $ pe descărcare). Interval larg: de 2× mai puțin până la 2× mai mult.',
   change: 'Ce s-a schimbat: nume nou (testează alte cuvinte cheie), versiune nouă (cu noutățile, la cei din topul încasărilor) sau preț nou. Ce schimbă cei care fac bani arată ce funcționează.',
   date: 'Ziua în care am observat schimbarea.',
+  launch: 'Ziua în care aplicația se lansează (data anunțată de editor în App Store; o poate muta). Dedesubt: câte zile mai sunt.',
+  visibility: 'Cât de vizibilă e precomanda în căutările App Store: pentru fiecare cuvânt pe care apare, locul 1 = 1 punct, locul 200 ≈ 0. Apple nu arată numărul de precomenzi nimănui, deci asta e cel mai bun semn: editorii care împing un joc îl fac vizibil pe multe cuvinte. Săgeata = schimbarea față de acum 7 zile. Căutăm zilnic ~40 de cuvinte largi (mai ales de jocuri), 200 de rezultate fiecare.',
+  termList: 'Cuvintele pe care apare azi și locul în căutare. Click pe cuvânt = istoricul lui. Numele jocului vor deveni căutări noi după lansare.',
+  pub: 'Cât de mare e editorul: cea mai mare aplicație a lui din aceleași căutări (rating-uri). 🎯 = joc al unui editor mare (peste 100.000 de rating-uri): la lansare, oamenii vor căuta ghiduri, hărți, calculatoare, tier list-uri. Ocazie pentru o aplicație-însoțitor lansată în aceeași zi.',
+  daysSince: 'De câte zile e lansată (după ce a stat la precomandă).',
   apps: 'Primele app-uri din căutarea App Store pentru acest cuvânt. Click pe iconiță = pagina aplicației. „în coadă” = cuvântul încă nu a fost clasificat; deschide cuvântul ca să vezi app-urile acum.',
 };
 
@@ -75,10 +80,11 @@ const VIEWS = {
   changes: { title: 'Schimbări', periods: [[7, 'Ultimele 7 zile'], [14, 'Ultimele 14 zile'], [30, 'Ultimele 30 zile']], def: 7 },
   apps: { title: 'Aplicații noi', periods: [[30, 'Lansate în ultimele 30 zile'], [90, 'Lansate în ultimele 90 zile'], [180, 'Lansate în ultimele 6 luni'], [365, 'Lansate în ultimul an']], def: 90 },
   themes: { title: 'Teme topuri', periods: null },
+  upcoming: { title: 'Lansări viitoare', periods: null },
   search: { title: 'Caută kw', periods: null },
   app: { title: 'Aplicație', periods: null },
 };
-const state = { view: 'new', country: 'US', category: 'all', period: 7, origin: 'appeared', chartType: 'all', source: 'charts', who: 'money', allNiches: false, text: '', sort: null, rows: [], term: '', appId: null, appCountry: 'US', appKwAll: false };
+const state = { view: 'new', country: 'US', category: 'all', period: 7, origin: 'appeared', chartType: 'all', source: 'charts', who: 'money', status: 'preorder', allNiches: false, text: '', sort: null, rows: [], term: '', appId: null, appCountry: 'US', appKwAll: false };
 
 const COLS = {
   country: { label: 'Țara' },
@@ -118,6 +124,11 @@ const COLS = {
   change: { label: 'Schimbare', help: 'change' },
   date: { label: 'Când', help: 'date' },
   lastSeen: { label: 'Ultima dată' },
+  launch: { label: 'Se lansează', help: 'launch' },
+  visibility: { label: 'Vizibilitate', num: true, help: 'visibility' },
+  termList: { label: 'Apare pe', help: 'termList' },
+  pub: { label: 'Editor', num: true, help: 'pub' },
+  daysSince: { label: 'Lansată', num: true, help: 'daysSince' },
 };
 const VIEW_COLS = {
   new: ['term', 'score', 'apps', 'origin', 'categoryName', 'difficulty', 'seenOf', 'firstSeen'],
@@ -130,10 +141,13 @@ const VIEW_COLS = {
   niches: ['term', 'apps', 'opportunity', 'chance', 'demand', 'competition', 'market', 'moneyApps', 'categoryName'],
   breakouts: ['icon', 'name', 'releaseDate', 'recent', 'ratio', 'bestRank', 'gross', 'estimate'],
   changes: ['icon', 'name', 'date', 'change', 'gross'],
+  upcoming: ['icon', 'name', 'launch', 'visibility', 'termList', 'pub', 'countryCount'],
+  upcomingLaunched: ['icon', 'name', 'daysSince', 'ratingsPerDay', 'bestRank', 'gross', 'daysToTop', 'estimate', 'pub'],
 };
-const APP_VIEWS = ['apps', 'breakouts', 'changes'];
+const APP_VIEWS = ['apps', 'breakouts', 'changes', 'upcoming'];
 const TYPE_LABEL = { topfreeapplications: 'gratuite', toppaidapplications: 'plătite', topgrossingapplications: 'încasări' };
-const viewCols = () => VIEW_COLS[state.view === 'apps' && state.source === 'feed' ? 'feed' : state.view];
+const viewCols = () => VIEW_COLS[state.view === 'apps' && state.source === 'feed' ? 'feed'
+  : state.view === 'upcoming' && state.status === 'launched' ? 'upcomingLaunched' : state.view];
 const compLabel = (v) => (v < 35 ? ['mică', 'up'] : v < 65 ? ['medie', ''] : ['mare', 'down']);
 const fmtNum = (n) => (n == null ? '–' : n >= 10000 ? `${Math.round(n / 1000).toLocaleString('ro-RO')}k` : n.toLocaleString('ro-RO'));
 
@@ -210,6 +224,14 @@ function cell(col, r) {
       ? `<td class="apps-cell" data-ids="${r.apps.join(',')}" data-cc="${r.country}">${r.apps.map(() => '<span class="ico ph"></span>').join('')}</td>`
       : '<td><span class="muted">în coadă</span></td>';
     case 'firstSeen': return v ? `<td>${esc(fmtDay(v))} <span class="muted">· ${ago(v)}</span></td>` : '<td>–</td>';
+    case 'launch': return `<td><b>${esc(fmtDate(r.releaseDate))}</b><div class="meta ${r.daysLeft <= 14 ? 'up' : 'muted'}">${r.daysLeft === 1 ? 'mâine' : `peste ${r.daysLeft} zile`}</div><div class="meta muted">văzută din ${esc(fmtDay(r.firstSeen))}</div></td>`;
+    case 'visibility': {
+      const d = r.visibilityThen == null ? null : Math.round((v - r.visibilityThen) * 10) / 10;
+      return `<td class="num"><b>${String(v).replace('.', ',')}</b>${d == null ? ' <span class="badge new" data-tip="Văzută prima dată în ultima săptămână.">nouă</span>' : d ? ` <span class="${d > 0 ? 'up' : 'down'}">${d > 0 ? '▲' : '▼'}${String(Math.abs(d)).replace('.', ',')}</span>` : ''}<div class="meta muted">${r.terms} ${r.terms === 1 ? 'cuvânt' : 'cuvinte'}${r.bestPosition ? ` · cel mai bun #${r.bestPosition}` : ''}</div></td>`;
+    }
+    case 'termList': return `<td class="terms">${(v ?? []).map((t) => `<a data-term="${esc(t.term)}" class="chip">${esc(t.term)} <span class="muted">#${t.position}</span></a>`).join(' ') || '<span class="muted" data-tip="Azi n-a apărut în căutările noastre.">–</span>'}</td>`;
+    case 'pub': return `<td class="num">${v ? `${fmtNum(v)}<div class="meta muted">rating-uri</div>` : '<span class="muted">mic</span>'}${r.companion ? '<div><span class="badge money" data-tip="Joc al unui editor mare: la lansare oamenii vor căuta ghiduri, hărți, calculatoare, tier list-uri. Ocazie pentru o aplicație-însoțitor lansată în aceeași zi.">🎯 însoțitor</span></div>' : ''}</td>`;
+    case 'daysSince': return `<td class="num">${v === 0 ? 'azi' : `acum ${v} ${v === 1 ? 'zi' : 'zile'}`}<div class="meta muted">${esc(fmtDay(r.releaseDate))}</div></td>`;
     case 'confirmed': return `<td>${v ? '<span class="badge ok">confirmat</span>' : '<span class="badge new">nou</span>'}</td>`;
     default: return `<td>${esc(v ?? '–')}</td>`;
   }
@@ -256,6 +278,7 @@ function setupFilters() {
   $('#f-type-wrap').style.display = state.view === 'apps' && state.source !== 'feed' ? '' : 'none';
   $('#f-source-wrap').style.display = state.view === 'apps' ? '' : 'none';
   $('#f-who-wrap').style.display = state.view === 'changes' ? '' : 'none';
+  $('#f-status-wrap').style.display = state.view === 'upcoming' ? '' : 'none';
   $('#f-text').style.display = isTable ? '' : 'none';
   $('#csv').style.display = isTable && !APP_VIEWS.includes(state.view) && state.view !== 'niches' ? '' : 'none';
   if (v.periods) {
@@ -308,6 +331,13 @@ function breakoutsNotice(r) {
   $('#notice').innerHTML = r.measured
     ? '<div class="notice info">Aplicațiile care primesc acum de cel puțin 3× mai multe rating-uri pe zi decât de obicei (minim 5 pe zi). Ceva le-a aprins: un video viral, featuring de la Apple, reclame sau un trend nou. Deschide aplicația ca să vezi pe ce cuvinte apare și de ce se plâng utilizatorii.</div>'
     : '<div class="notice">Exploziile apar după ce avem cel puțin 3 zile la rând de rating-uri zilnice: creșterea trebuie să țină minim 2 zile, ca să nu confundăm o cifră întârziată de la Apple cu o explozie. Le adunăm din 21 oct 2026, deci primele apar pe 23 oct.</div>';
+}
+
+function upcomingNotice(r) {
+  const waves = Object.entries(r.waves ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([c, n]) => `${esc(c)} ${n}`).join(' · ');
+  $('#notice').innerHTML = state.status === 'launched'
+    ? `<div class="notice info">Aplicațiile care au stat la precomandă și s-au lansat în ultimele 60 de zile: cât de repede au intrat în topuri, câte rating-uri primesc pe zi și dacă fac bani. Așa vezi ce fel de lansări reușesc.${r.total ? '' : ' Încă nicio precomandă urmărită nu s-a lansat; le urmărim din 5 nov 2026.'}</div>`
+    : `<div class="notice info">Aplicațiile anunțate, încă nelansate, pe care Apple le arată în căutări. Sus sunt cele mai vizibile: editorii le împing pe multe cuvinte. 🎯 = joc mare, ocazie pentru o aplicație-însoțitor (ghid, hartă, calculator) lansată în aceeași zi. Apple nu publică numărul de precomenzi, așa că clasamentul e după vizibilitate.${waves ? `<br>Pe categorii azi: ${waves}.` : ''}${r.total ? '' : ' Precomenzile se adună din 5 nov 2026: revino după colectarea de mâine.'}</div>`;
 }
 
 function changesNotice(r) {
@@ -405,11 +435,11 @@ async function renderView(scrollY = 0) {
   if (state.view === 'search') { renderSearch(); return window.scrollTo(0, 0); }
   if (state.view === 'app') { await renderApp(); return window.scrollTo(0, scrollY); }
   if (state.view === 'themes') { await renderThemes(); return window.scrollTo(0, scrollY); }
-  const params = new URLSearchParams({ name: state.view, country: state.country, category: state.category, period: state.period, origin: state.origin, type: state.chartType, source: state.source, who: state.who, all: state.allNiches ? '1' : '0' });
+  const params = new URLSearchParams({ name: state.view, country: state.country, category: state.category, period: state.period, origin: state.origin, type: state.chartType, source: state.source, who: state.who, status: state.status, all: state.allNiches ? '1' : '0' });
   const key = params.toString();
   if (!viewCache.has(key)) {
     $('#content').innerHTML = '<div class="empty">Se calculează…</div>';
-    const endpoint = { apps: '/api/new-apps', niches: '/api/niches', breakouts: '/api/breakouts', changes: '/api/changes' }[state.view] ?? '/api/view';
+    const endpoint = { apps: '/api/new-apps', niches: '/api/niches', breakouts: '/api/breakouts', changes: '/api/changes', upcoming: '/api/upcoming' }[state.view] ?? '/api/view';
     viewCache.set(key, await api(`${endpoint}?${params}`));
   }
   const r = viewCache.get(key);
@@ -418,6 +448,7 @@ async function renderView(scrollY = 0) {
   else if (state.view === 'niches') nichesNotice(r);
   else if (state.view === 'breakouts') breakoutsNotice(r);
   else if (state.view === 'changes') changesNotice(r);
+  else if (state.view === 'upcoming') upcomingNotice(r);
   else notice(r.meta);
   renderTable();
   window.scrollTo(0, scrollY);
@@ -427,7 +458,7 @@ async function renderView(scrollY = 0) {
 history.scrollRestoration = 'manual';
 const snapshot = () => ({
   view: state.view, country: state.country, category: state.category, period: state.period,
-  origin: state.origin, chartType: state.chartType, source: state.source, who: state.who, term: state.term, text: state.text, sort: state.sort, from: state.from ?? null,
+  origin: state.origin, chartType: state.chartType, source: state.source, who: state.who, status: state.status, term: state.term, text: state.text, sort: state.sort, from: state.from ?? null,
   appId: state.appId, appCountry: state.appCountry, appKwAll: state.appKwAll,
 });
 // Pagina noua: memoram unde eram (inclusiv scroll-ul) in intrarea curenta, apoi adaugam una noua.
@@ -452,6 +483,7 @@ function syncControls() {
   $('#f-type').value = state.chartType;
   $('#f-source').value = state.source;
   $('#f-who').value = state.who;
+  $('#f-status').value = state.status;
   $('#f-text').value = state.text;
 }
 
@@ -774,6 +806,7 @@ $('#f-origin').addEventListener('change', onFilter((v) => { state.origin = v; })
 $('#f-type').addEventListener('change', onFilter((v) => { state.chartType = v; }));
 $('#f-source').addEventListener('change', onFilter((v) => { state.source = v; state.sort = null; }));
 $('#f-who').addEventListener('change', onFilter((v) => { state.who = v; }));
+$('#f-status').addEventListener('change', onFilter((v) => { state.status = v; state.sort = null; }));
 $('#f-text').addEventListener('input', (e) => { state.text = e.target.value; renderTable(); remember(); });
 $('#content').addEventListener('click', (e) => {
   const th = e.target.closest('th[data-sort]');

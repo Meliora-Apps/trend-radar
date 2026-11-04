@@ -19,6 +19,7 @@ export const RETAIN = {
   hist: 182, // ...apoi o zi pe saptamana, pana la ~6 luni
   feed: 366, // lansarile noi (filtrul "lansate in ultimele 365 de zile")
   changes: 366, // schimbarile app-urilor (nume, versiune)
+  upcoming: 120, // precomenzile vazute in cautari (prima aparitie, urcarea pe zile)
 };
 
 const SCHEMA = `
@@ -55,6 +56,10 @@ CREATE INDEX IF NOT EXISTS new_feed_cd ON new_feed (country, date);
 CREATE TABLE IF NOT EXISTS app_changes (country TEXT, date TEXT, id INTEGER, field TEXT, from_v TEXT, to_v TEXT, notes TEXT);
 CREATE INDEX IF NOT EXISTS app_changes_cd ON app_changes (country, date);
 CREATE INDEX IF NOT EXISTS app_changes_id ON app_changes (id, date);
+CREATE TABLE IF NOT EXISTS upcoming (country TEXT, date TEXT, id INTEGER, term TEXT, position INTEGER, name TEXT,
+  seller TEXT, genre_id INTEGER, release_date TEXT, price REAL, pub INTEGER,
+  PRIMARY KEY (country, date, id, term)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS upcoming_id ON upcoming (country, id, date);
 `;
 // 8 = baza de calcul compacta: tabele WITHOUT ROWID, istoric limitat (RETAIN), app_hist, chart_first,
 //     queried_first, app_names. Bazele mai vechi se refac de la zero din fisierele zilnice.
@@ -83,6 +88,11 @@ function importDay(db, day) {
   db.prepare('DELETE FROM scores WHERE country=? AND date=?').run(cc, date);
   db.prepare('DELETE FROM charts WHERE country=? AND date=?').run(cc, date);
   db.prepare('DELETE FROM new_feed WHERE country=? AND date=?').run(cc, date);
+  db.prepare('DELETE FROM upcoming WHERE country=? AND date=?').run(cc, date);
+  const insUp = db.prepare('INSERT OR IGNORE INTO upcoming VALUES (?,?,?,?,?,?,?,?,?,?,?)');
+  for (const u of day.upcoming ?? []) {
+    for (const a of u.apps) insUp.run(cc, date, a.id, u.term, a.position, a.name, a.seller, a.genreId, a.releaseDate, a.price ?? 0, a.pub ?? 0);
+  }
   const insFeed = db.prepare('INSERT INTO new_feed VALUES (?,?,?,?,?,?,?)');
   for (const f of day.newFeed ?? []) for (const a of f.apps) insFeed.run(cc, date, f.type, a.rank, a.id, a.name, a.genreId);
   const upQueried = db.prepare(`INSERT INTO queried_first VALUES (?,?,?) ON CONFLICT (country, prefix) DO UPDATE SET
@@ -219,6 +229,7 @@ export function prune(db) {
       db.prepare('DELETE FROM app_stats WHERE country=? AND date<?').run(cc, addDays(latest, -RETAIN.stats));
       db.prepare('DELETE FROM new_feed WHERE country=? AND date<?').run(cc, addDays(latest, -RETAIN.feed));
       db.prepare('DELETE FROM app_changes WHERE country=? AND date<?').run(cc, addDays(latest, -RETAIN.changes));
+      db.prepare('DELETE FROM upcoming WHERE country=? AND date<?').run(cc, addDays(latest, -RETAIN.upcoming));
       db.prepare(`DELETE FROM app_hist WHERE country=? AND (date<? OR (date<? AND CAST(julianday(date) AS INTEGER) % 7 != 0))`)
         .run(cc, addDays(latest, -RETAIN.hist), addDays(latest, -RETAIN.histDaily));
     }

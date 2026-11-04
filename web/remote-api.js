@@ -109,6 +109,12 @@ export function makeRemoteApi(convex) {
       const r = await one(key);
       return r ? page(r.rows.filter(inCategory(q.get('category')))) : { total: 0, rows: [] };
     },
+    '/api/upcoming': async (q) => {
+      const r = await one(`list/${q.get('country') ?? 'US'}/upcoming`);
+      if (!r) return { total: 0, rows: [], latest: null, waves: {} };
+      const status = q.get('status') === 'launched' ? 'launched' : 'preorder';
+      return page(r[status].filter(inCategory(q.get('category'))), { latest: r.latest, waves: r.waves, other: r[status === 'launched' ? 'preorder' : 'launched'].length });
+    },
     '/api/themes': async (q) => {
       const all = (await one(`list/${q.get('country') ?? 'US'}/themes`)) ?? [];
       const c = q.get('category') ?? 'all';

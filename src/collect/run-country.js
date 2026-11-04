@@ -7,7 +7,8 @@ import { buildFromDays, applyClassifications } from '../metrics/build.js';
 import { rising } from '../metrics/trends.js';
 import { nicheStats } from '../metrics/niche.js';
 import {
-  NICHE_DAYS, NICHE_APPS_MAX, RECLASSIFY_DAYS, MAX_FAILURE_RATE, EXPAND_MAX, expansionPrefixes, classificationQueue, nicheAppIds,
+  NICHE_DAYS, NICHE_APPS_MAX, RECLASSIFY_DAYS, MAX_FAILURE_RATE, EXPAND_MAX, expansionPrefixes, classificationQueue,
+  nicheAppIds, upcomingIds, upcomingTermsFrom,
 } from './steps.js';
 import {
   dayPath, classifyPath, writeJsonGz, readCountryDays, readCountryClassifications,
@@ -29,6 +30,7 @@ export async function runCountry({
     classifyMs = 3 * 3600_000,
     classifyMax = Infinity,
     appMetaMax = Infinity,
+    upcomingTerms = null,
   } = budget;
   const { counter } = apple;
   let aborted = false;
@@ -41,7 +43,8 @@ export async function runCountry({
   };
 
   // Istoricul dinainte de azi (din depozit).
-  const { series, index } = buildFromDays(readCountryDays(dataDir, country, { before: date }));
+  const pastDays = readCountryDays(dataDir, country, { before: date });
+  const { series, index } = buildFromDays(pastDays);
   applyClassifications(index, readCountryClassifications(dataDir, country, { before: date }));
 
   // 1. Sugestii
@@ -91,11 +94,22 @@ export async function runCountry({
   }
 
   // 3c. Lookup: data lansarii (app-uri noi) + rating-urile zilei (toate) pentru "Aplicatii noi",
-  //     plus app-urile din nisele calde (banii din nisa).
-  const extraIds = [...newFeed.flatMap((f) => f.apps.map((a) => a.id)), ...nicheAppIds(series, index)];
+  //     plus app-urile din nisele calde (banii din nisa) si precomenzile urmarite.
+  const extraIds = [...newFeed.flatMap((f) => f.apps.map((a) => a.id)), ...nicheAppIds(series, index), ...upcomingIds(pastDays, date)];
   const appMeta = await collectAppMeta({
     country, date, dataDir, apple, charts, extraIds, log, stop, max: appMetaMax,
   });
+
+  // 3d. Precomenzi: app-urile inca nelansate din cautarile largi
+  const upcoming = [];
+  for (const term of upcomingTerms ?? upcomingTermsFrom(pastDays.filter((d) => d.complete).at(-1)?.charts)) {
+    if (stop()) break;
+    try {
+      upcoming.push({ term, apps: await apple.upcoming(term, country, date) });
+    } catch (err) {
+      log(`[${country}] precomenzi "${term}" esuat: ${err.message}`);
+    }
+  }
 
   // 4. Clasificare pe categorii (in limita de timp; restul ramane pe maine)
   const todayScores = scoreDay(suggest);
@@ -126,7 +140,7 @@ export async function runCountry({
   // O rulare de proba acopera putine inceputuri: nu conteaza ca zi completa (ar strica trendurile).
   const complete = !smoke && keywordsOk;
   writeJsonGz(dayPath(dataDir, date, country), {
-    date, country, complete, smoke, requests, errors: failures, suggest, charts, newFeed,
+    date, country, complete, smoke, requests, errors: failures, suggest, charts, newFeed, upcoming,
   });
   // Scris mereu (si gol), ca artefactul din GitHub sa pastreze structura data/days + data/classify.
   writeJsonGz(classifyPath(dataDir, date, country), classified);

@@ -1,8 +1,8 @@
 // Din baza de calcul (src/local/db.js): planul colectarii de maine si datele pentru fisierele app-urilor de azi.
 import { RETAIN } from '../local/db.js';
 import { rising } from '../metrics/trends.js';
-import { EXPAND_MAX, expansionPrefixes, nicheAppIds } from '../collect/steps.js';
-import { STATS_FIELDS } from '../collect/steps.js';
+import { EXPAND_MAX, UPCOMING_FOLLOW_DAYS, STATS_FIELDS, expansionPrefixes, nicheAppIds, upcomingTermsFrom } from '../collect/steps.js';
+import { addDays } from '../util/dates.js';
 
 // Seria scorurilor brute (ca la colectare: scoreDay, fara penalizarea combinatiilor rare) pe zilele complete
 // pastrate in baza, si indexul cuvintelor (prima/ultima aparitie + ultima clasificare).
@@ -42,8 +42,29 @@ export function collectPlan(db, cc) {
     expand: expansionPrefixes(series, index, EXPAND_MAX),
     nicheIds: nicheAppIds(series, index),
     hot: rising(series, 7).map((r) => r.term),
+    upcomingIds: upcomingIdsOf(db, cc, series.dates.at(-1)),
+    upcomingTerms: upcomingTermsFrom(lastCharts(db, cc, series.dates.at(-1))),
     terms,
   };
+}
+
+// Topurile ultimei zile (ca in fisierul zilnic), pentru upcomingTermsFrom.
+function lastCharts(db, cc, latest) {
+  if (!latest) return [];
+  const byList = new Map();
+  for (const r of db.prepare('SELECT type, genre_id, rank, app_id, name FROM charts WHERE country=? AND date=?').iterate(cc, latest)) {
+    const k = `${r.type}/${r.genre_id}`;
+    if (!byList.has(k)) byList.set(k, { type: r.type, genreId: r.genre_id, apps: [] });
+    byList.get(k).apps.push({ rank: r.rank, id: r.app_id, name: r.name });
+  }
+  return [...byList.values()];
+}
+
+// Precomenzile de urmarit maine (ca upcomingIds din steps.js, din tabela upcoming).
+function upcomingIdsOf(db, cc, latest) {
+  if (!latest) return [];
+  return db.prepare('SELECT DISTINCT id FROM upcoming WHERE country=? AND release_date>=? ORDER BY id')
+    .all(cc, addDays(addDays(latest, 1), -UPCOMING_FOLLOW_DAYS)).map((r) => r.id);
 }
 
 // Ce stim despre app-uri inainte de ziua `date` (pentru appFiles din steps.js): id-urile descrise, numele

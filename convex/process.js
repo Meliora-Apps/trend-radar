@@ -21,7 +21,9 @@ import { v } from 'convex/values';
 import { COUNTRIES } from '../src/apple/clients.js';
 import { openDb, importFile, isImported, prune, KINDS } from '../src/local/db.js';
 import { assembleDay } from '../src/collect/worker.js';
-import { appFiles, grossingIds } from '../src/collect/steps.js';
+import { appFiles, grossingIds, upcomingTermsFrom } from '../src/collect/steps.js';
+import { makeAppleClient } from '../src/apple/clients.js';
+import { makeRetry } from '../src/apple/net.js';
 import { collectPlan, appState } from '../src/compute/plan.js';
 import { exportFiles, EXPORT_PARTS } from '../src/export/build.js';
 
@@ -35,6 +37,13 @@ const mb = () => `${Math.round(process.memoryUsage().rss / 1e6)} MB`;
 v8.setFlagsFromString('--expose_gc');
 const gc = vm.runInNewContext('gc');
 const GC_EVERY = 32;
+// Un calcul oprit fortat (memorie, timp) nu-si sterge folderul temporar, iar discul e refolosit de la o actiune
+// la alta: la pornire stergem ce a ramas (ruleaza un singur calcul odata, vezi claimProcess).
+function cleanTmp() {
+  for (const name of fs.readdirSync(os.tmpdir())) {
+    if (name.startsWith('tr-')) fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
+  }
+}
 const freeMb = (dir) => { const s = fs.statfsSync(dir); return Math.round((s.bavail * s.bsize) / 1e6); };
 
 const blobOf = async (ctx, id) => {
@@ -167,6 +176,7 @@ export const run = internalAction({
   handler: async (ctx, { date }) => {
     const token = crypto.randomUUID();
     if (!(await ctx.runMutation(internal.store.claimProcess, { date, token }))) return 'alt calcul ruleaza';
+    cleanTmp();
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tr-'));
     const started = Date.now();
     const lines = [];
@@ -225,6 +235,7 @@ export const resume = internalAction({
   args: { date: v.string(), token: v.string(), gen: v.string(), part: v.number(), cloud: v.any() },
   handler: async (ctx, { date, token, gen, part, cloud }) => {
     if (!(await ctx.runMutation(internal.store.claimProcess, { date, token }))) return 'alt calcul ruleaza';
+    cleanTmp();
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tr-'));
     const started = Date.now();
     const lines = [];
@@ -246,5 +257,31 @@ export const resume = internalAction({
       fs.rmSync(dir, { recursive: true, force: true });
       if (!keepLock) await ctx.runMutation(internal.store.releaseProcess, { token });
     }
+  },
+});
+
+// Unealta manuala: cauta precomenzile pentru o zi deja colectata (o tara) si le adauga in fisierul zilei din arhiva.
+// Dupa toate tarile: process:run pentru aceeasi zi. npx convex run --prod process:addUpcoming '{"date":"...","country":"US"}'
+export const addUpcoming = internalAction({
+  args: { date: v.string(), country: v.string() },
+  handler: async (ctx, { date, country }) => {
+    const raw = await ctx.runQuery(internal.store.rawOf, { kind: 'days', date, country });
+    if (!raw) throw new Error(`lipseste ziua ${date}/${country}`);
+    const day = JSON.parse(gunzipSync(await blobOf(ctx, raw.storageId)).toString('utf8'));
+    const apple = makeAppleClient({ retry: makeRetry({ retries: 2, baseDelayMs: 15_000, log: console.log }) });
+    const deadline = Date.now() + 8 * 60_000;
+    const upcoming = [];
+    for (const term of upcomingTermsFrom(day.charts)) {
+      if (Date.now() > deadline) break;
+      try {
+        upcoming.push({ term, apps: await apple.upcoming(term, country, date) });
+      } catch (err) {
+        console.log(`${country} "${term}": ${err.message}`);
+      }
+    }
+    const buf = gzipSync(JSON.stringify({ ...day, upcoming }));
+    await ctx.runMutation(internal.store.saveRaw, { kind: 'days', date, country, storageId: await store(ctx, buf), size: buf.length });
+    const ids = new Set(upcoming.flatMap((u) => u.apps.map((a) => a.id)));
+    return `${country}: ${upcoming.length} cautari, ${ids.size} precomenzi`;
   },
 });

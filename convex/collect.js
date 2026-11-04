@@ -15,7 +15,7 @@ const MAX_TICKS = 300; // peste atat (~20 ore), ceva e gresit: ziua se marcheaza
 const LOG_MAX = 300;
 const MAX_ATTEMPTS = 4;
 // Faza in care trebuie pregatita o lista (vezi preparePhase) si ce bucati ii trebuie.
-const PREP_NEEDS = { expand: [], lookup: ['charts', 'feed'], classify: ['base', 'expand'] };
+const PREP_NEEDS = { expand: [], lookup: ['charts', 'feed'], upcoming: [], classify: ['base', 'expand'] };
 
 const runOf = (ctx, date) => ctx.db.query('runs').withIndex('by_date', (q) => q.eq('date', date)).unique();
 const jobsOf = (ctx, date) => ctx.db.query('jobs').withIndex('by_date_country', (q) => q.eq('date', date)).collect();

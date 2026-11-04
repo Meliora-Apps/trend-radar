@@ -4,7 +4,7 @@
 //
 // Fisiere (cheie -> continut):
 //   meta                                  stare + categorii + tari
-//   list/<CC>/<view>/<variant>             listele (cuvinte noi, in crestere, nise, explozii...), categoria 'all'
+//   list/<CC>/<view>/<variant>             listele (cuvinte noi, in crestere, nise, explozii, precomenzi...), categoria 'all'
 //   terms                                 toate cuvintele vazute (pentru sugestiile din cautare)
 //   term/<shard>                          pagina fiecarui cuvant (termView), grupate dupa hash
 //   app/<shard>                           cuvintele, locurile in topuri, estimarile si schimbarile fiecarui app
@@ -35,6 +35,7 @@ export function listVariants() {
       out.push([`list/${cc}/apps/feed/${launched}`, (v) => v.newApps({ country: cc, launched, source: 'feed', limit: Infinity })]);
     }
     out.push([`list/${cc}/themes`, (v) => v.themeView({ country: cc })]);
+    out.push([`list/${cc}/upcoming`, (v) => v.upcomingView({ country: cc })]);
   }
   return out;
 }

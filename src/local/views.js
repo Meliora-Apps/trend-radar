@@ -62,6 +62,13 @@ export function loadIndex(db, cc) {
   return index;
 }
 
+// Precomenzi: istoricul citit (zile) si cat urmarim dupa lansare; jocurile editorilor mari (cel mai mare joc al lor
+// are peste COMPANION_PUB rating-uri) sunt ocazii pentru aplicatii-insotitor (ghiduri, harti, calculatoare).
+const UPCOMING_RECENT_DAYS = 60;
+const LAUNCHED_DAYS = 60;
+const GAMES = 6014;
+const COMPANION_PUB = 100_000;
+
 // Cache pe tara, invalidat la fiecare import (versiune).
 export function makeViews(db) {
   // Cererile SQL pregatite o singura data (fiecare cerere pregatita tine memorie in SQLite pana e stearsa de GC).
@@ -693,8 +700,89 @@ export function makeViews(db) {
     return { countries, problems };
   }
 
+  // Precomenzile vazute in cautarile largi (tabela upcoming) si cele lansate de curand dupa precomanda.
+  // Vizibilitatea = suma pe cuvinte a (201 - locul) / 200: un cuvant pe locul 1 = 1, pe locul 200 ≈ 0.
+  // Fara numarul de precomenzi (Apple nu-l arata nimanui): clasamentul e dupa cat de vizibila e aplicatia in cautari.
+  function upcomingFor(cc) {
+    const latest = q('SELECT MAX(date) d FROM upcoming WHERE country=?').get(cc).d;
+    if (!latest) return { latest: null, preorder: [], launched: [] };
+    const weekAgo = q('SELECT MAX(date) d FROM upcoming WHERE country=? AND date<=?').get(cc, addDays(latest, -7)).d;
+    const vis = (rows) => Math.round(rows.reduce((n, r) => n + (201 - r.position) / 200, 0) * 10) / 10;
+    const byId = new Map();
+    for (const r of q('SELECT * FROM upcoming WHERE country=? AND date>=? ORDER BY date, position').all(cc, addDays(latest, -UPCOMING_RECENT_DAYS))) {
+      const a = byId.get(r.id) ?? { last: r, today: [], then: [] };
+      a.last = r; // datele de pe ultima zi (numele si data lansarii se pot schimba)
+      if (r.date === latest) a.today.push(r);
+      if (r.date === weekAgo) a.then.push(r);
+      byId.set(r.id, a);
+    }
+    const firstQ = q('SELECT MIN(date) d FROM upcoming WHERE country=? AND id=?');
+    const firstIn = q('SELECT first_date d FROM chart_first WHERE country=? AND app_id=?');
+    const vel = velocity(cc).map;
+    const { dl, gross } = todayRanks(cc);
+    const preorder = [];
+    const launched = [];
+    for (const [id, a] of byId) {
+      const r = a.last;
+      const base = {
+        id, country: cc, name: r.name, seller: r.seller, genreId: r.genre_id, categoryName: genreName(r.genre_id),
+        releaseDate: r.release_date, price: r.price, pub: r.pub, firstSeen: firstQ.get(cc, id).d, lastSeen: r.date,
+        companion: r.genre_id === GAMES && r.pub >= COMPANION_PUB,
+      };
+      if (r.release_date > latest) {
+        preorder.push({
+          ...base, daysLeft: diffDays(r.release_date, latest),
+          terms: a.today.length, termsThen: weekAgo ? a.then.length : null,
+          visibility: vis(a.today), visibilityThen: weekAgo ? vis(a.then) : null,
+          bestPosition: a.today.length ? Math.min(...a.today.map((x) => x.position)) : null,
+          termList: [...a.today].sort((x, y) => x.position - y.position).slice(0, 6).map((x) => ({ term: x.term, position: x.position })),
+        });
+      } else if (r.release_date >= addDays(latest, -LAUNCHED_DAYS)) {
+        const v = vel.get(id), d = dl.get(id), g = gross.get(id);
+        const top = firstIn.get(cc, id)?.d ?? null;
+        launched.push({
+          ...base, daysSince: diffDays(latest, r.release_date),
+          ratings: v?.ratings ?? null, ratingsPerDay: v?.perDay ?? null, stars: v?.stars ?? null,
+          bestRank: d?.rank ?? null, bestChartName: d ? genreName(d.genre_id) : null, type: d?.type ?? null,
+          grossRank: g?.rank ?? null, grossChartName: g ? genreName(g.genre_id) : null,
+          inTopSince: top, daysToTop: top && top >= r.release_date ? diffDays(top, r.release_date) : null,
+          estimate: v?.perDay != null ? marketEstimate(v.perDay) : null,
+        });
+      }
+    }
+    return { latest, preorder, launched };
+  }
+
+  function upcomingView({ country = 'US', category = 'all' }) {
+    const ccs = country === 'ALL' ? COUNTRIES : [country];
+    const parts = ccs.map((cc) => memo(`upcoming:${cc}`, () => upcomingFor(cc)));
+    // ALL: o aplicatie o data, cu tarile ei; cifrele din tara unde e cea mai vizibila (lansate: cea cu mai multe rating-uri/zi).
+    const merge = (lists, better) => {
+      const byId = new Map();
+      for (const r of lists.flat()) {
+        const cur = byId.get(r.id);
+        if (!cur) byId.set(r.id, { ...r, countries: [r.country] });
+        else {
+          cur.countries.push(r.country);
+          if (better(r, cur)) Object.assign(cur, { ...r, countries: cur.countries });
+        }
+      }
+      return [...byId.values()].map((r) => ({ ...r, countryCount: r.countries.length }));
+    };
+    const preorder = merge(parts.map((p) => p.preorder), (a, b) => a.visibility > b.visibility)
+      .filter(byCategory(category))
+      .sort((a, b) => b.visibility - a.visibility || b.countryCount - a.countryCount || a.daysLeft - b.daysLeft || a.id - b.id);
+    const launched = merge(parts.map((p) => p.launched), (a, b) => (a.ratingsPerDay ?? -1) > (b.ratingsPerDay ?? -1))
+      .filter(byCategory(category))
+      .sort((a, b) => (b.ratingsPerDay ?? -1) - (a.ratingsPerDay ?? -1) || (b.ratings ?? 0) - (a.ratings ?? 0) || a.id - b.id);
+    // Valul pe categorii: cate precomenzi are fiecare categorie azi.
+    const waves = {};
+    for (const r of preorder) waves[r.categoryName] = (waves[r.categoryName] ?? 0) + 1;
+    return { latest: parts.map((p) => p.latest).filter(Boolean).sort().at(-1) ?? null, preorder, launched, waves };
+  }
+
   return {
-    view, themeView, termView, suggestTerms, appKeywords, newApps, appRanks, nicheView, breakoutView, changesView, appExtra, termApps,
+    view, themeView, termView, suggestTerms, appKeywords, newApps, appRanks, nicheView, breakoutView, changesView, upcomingView, appExtra, termApps,
     categories, status, bigOf, velocity,
     invalidate: () => { version++; cache.clear(); velCache.clear(); memoCache.clear(); bigCache.clear(); },
     forget: () => memoCache.clear(), // dupa liste: bucatile pe tara nu mai trebuie

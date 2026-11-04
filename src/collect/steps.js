@@ -11,6 +11,22 @@ export const MAX_FAILURE_RATE = 0.1;
 export const EXPAND_MAX = 300;
 
 export const LOOKUP_BATCH = 100;
+// Precomenzi: cautari largi (200 de rezultate) in care Apple arata si app-urile inca nelansate.
+// Mai ales jocuri (acolo sunt aproape toate precomenzile), plus cateva categorii mari de aplicatii.
+export const UPCOMING_TERMS = [
+  'game', 'games', 'rpg', 'anime', 'gacha', 'mmorpg', 'action', 'adventure', 'open world', 'fantasy', 'strategy',
+  'puzzle', 'racing', 'shooter', 'horror', 'survival', 'simulator', 'city builder', 'tower defense', 'idle', 'card game',
+  'battle royale', 'monster', 'dragon', 'football', 'soccer', 'sports', 'rhythm', 'visual novel', 'otome', 'farm',
+  'multiplayer', 'roguelike', 'platformer', 'arcade', 'ai', 'photo', 'music', 'fitness', 'finance',
+  // seriile mari: continuarile lor stau luni intregi la precomanda
+  'pokemon', 'final fantasy', 'honkai', 'genshin', 'zenless', 'wuthering waves', 'dragon ball', 'naruto', 'one piece',
+  'marvel', 'star wars', 'sonic', 'minecraft', 'sims', 'nba', 'gundam', 'persona', 'monster hunter', 'resident evil', 'tencent',
+];
+// Plus numele (primul cuvant) jocurilor care fac cei mai multi bani azi in tara: o serie mare are adesea
+// un joc nou la precomanda. Calculat din topul incasarilor de ieri (vezi upcomingTermsFrom).
+export const UPCOMING_FROM_CHARTS = 50;
+// App-urile vazute la precomanda le urmarim (lookup zilnic) si dupa lansare, atatea zile.
+export const UPCOMING_FOLLOW_DAYS = 60;
 // Ordinea campurilor din data/stats (tablou compact, ca fisierul zilnic sa ramana mic).
 export const STATS_FIELDS = ['ratings', 'ratingsCur', 'stars', 'version', 'updated', 'price'];
 export const NOTES_MAX = 600;
@@ -66,6 +82,33 @@ export function nicheAppIds(series, index, max = NICHE_APPS_MAX) {
     }
   }
   return [...ids];
+}
+
+// App-urile vazute la precomanda (in fisierele zilnice `days`) care inca nu s-au lansat sau s-au lansat
+// in ultimele UPCOMING_FOLLOW_DAYS zile: le verificam zilnic (nume, rating-uri dupa lansare).
+export function upcomingIds(days, date) {
+  const since = addDays(date, -UPCOMING_FOLLOW_DAYS);
+  const ids = new Set();
+  for (const d of days) for (const u of d.upcoming ?? []) for (const a of u.apps) if (a.releaseDate >= since) ids.add(a.id);
+  return [...ids].sort((a, b) => a - b);
+}
+
+// Cuvintele de cautat pentru precomenzi: cele fixe + primul cuvant din numele jocurilor din topul incasarilor
+// (`charts` = topurile unei zile, ca in fisierul zilnic), cele mai sus primele.
+export function upcomingTermsFrom(charts) {
+  const best = new Map();
+  for (const c of charts ?? []) {
+    if (c.type !== 'topgrossingapplications' || !(c.genreId === 6014 || (c.genreId >= 7000 && c.genreId < 8000))) continue;
+    for (const a of c.apps) if (!best.has(a.id) || a.rank < best.get(a.id).rank) best.set(a.id, { rank: a.rank, name: a.name });
+  }
+  const fixed = new Set(UPCOMING_TERMS);
+  const extra = [];
+  for (const [, a] of [...best].sort((x, y) => x[1].rank - y[1].rank || x[0] - y[0])) {
+    const word = (a.name ?? '').toLowerCase().split(/[\s:\-–—|(]/)[0].replace(/[^\p{L}\p{N}]/gu, '');
+    if (word.length >= 4 && !fixed.has(word) && !extra.includes(word)) extra.push(word);
+    if (extra.length >= UPCOMING_FROM_CHARTS) break;
+  }
+  return [...UPCOMING_TERMS, ...extra];
 }
 
 // App-urile de verificat azi: cele din topuri, apoi lansarile noi si app-urile din nisele calde.

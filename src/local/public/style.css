@@ -172,3 +172,4 @@ td.term .meta { margin-top: 3px; }
 .est-row { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 6px; }
 .est-row div b { font-size: 15px; }
 tr.dim td { opacity: .55; }
+td.terms .chip { display: inline-block; margin: 2px 0; cursor: pointer; font-weight: 500; }

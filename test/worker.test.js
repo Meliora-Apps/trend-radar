@@ -32,6 +32,13 @@ function fakeApple(day, { failEvery = 0 } = {}) {
     topApps: (t) => counter.track(async () => { maybeFail(); return apps(t.length + day); }),
     chart: (cc, type, genreId) => counter.track(async () => apps(genreId % 13 + day).map((a, i) => ({ rank: i + 1, id: a.id, name: a.name, genreId: a.genreId }))),
     newFeed: () => counter.track(async () => [{ rank: 1, id: 900 + day, name: `Fresh ${day}`, genreId: 6014 }]),
+    upcoming: (term, cc, after) => counter.track(async () => {
+      maybeFail();
+      // O precomanda noua la cateva zile; cea veche se lanseaza in ziua 6 (o urmarim si dupa).
+      return [{ id: 700 + (term.length % 3), position: 5 + day, name: `Soon ${term.length % 3}`, seller: 'Big', genreId: 6014,
+        releaseDate: term.length % 3 === 0 ? '2026-03-07' : '2026-05-01', price: 0, pub: 50000 }]
+        .filter((a) => a.releaseDate > after);
+    }),
     appMeta: (ids) => counter.track(async () => {
       maybeFail();
       return ids.map((id) => ({ id, name: id % 9 === 0 && day % 2 ? `Renamed ${id}` : `App ${id}`, genreId: 6000, releaseDate: '2026-09-01', seller: 'S',
@@ -50,7 +57,7 @@ async function collectInChunks({ date, plan, apple, msPerRequest = 1000, chunkMs
   let prep = null;
   let ticks = 0;
   while (job.phase !== 'done') {
-    if (job.pos === 0 && ['expand', 'lookup', 'classify'].includes(job.phase) && !job.prepared) {
+    if (job.pos === 0 && ['expand', 'lookup', 'upcoming', 'classify'].includes(job.phase) && !job.prepared) {
       prep = preparePhase(job, { plan, parts });
       job = { ...job, prepared: true };
     }
@@ -93,6 +100,9 @@ test('colectarea pe bucati = runCountry: aceleasi fisiere ale zilei', async () =
   assert.deepEqual(files.changes, readJsonGz(changesPath(ref, date, 'US')));
   assert.ok(got.day.suggest.some((s) => s.kind === 'expand'), 'extinderea din plan');
   assert.ok(files.changes.some((c) => c.field === 'name') && files.changes.some((c) => c.field === 'version'));
+  assert.ok(got.day.upcoming.length > 0, 'precomenzile zilei');
+  assert.ok(plan.upcomingIds.includes(700), 'precomanda lansata ieri ramane urmarita');
+  assert.ok(files.stats[700], 'si i se iau cifrele dupa lansare');
 });
 
 test('colectarea pe bucati: prea multe erori => oprire, zi incompleta', async () => {
