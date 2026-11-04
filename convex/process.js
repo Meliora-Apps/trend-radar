@@ -7,6 +7,8 @@
 // O actiune are maxim 10 minute: daca timpul nu ajunge, exportul continua (pe parti) intr-o actiune noua,
 // care reface baza din copia salvata la pasul 4.
 import crypto from 'node:crypto';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -28,6 +30,11 @@ const UPLOADS = 8;
 const FILES_BATCH = 100;
 const CONTINUE_AFTER_MS = 5 * 60_000; // o parte noua a exportului incepe doar daca actiunea e mai tanara de atat
 const mb = () => `${Math.round(process.memoryUsage().rss / 1e6)} MB`;
+// Node strange memoria nefolosita abia cand se apropie de limita lui (~3,6 GB aici), iar Convex opreste actiunea
+// mai devreme. Exportul are nevoie de ~400 MB: curatam noi, des (fiecare curatare ~0,2 s).
+v8.setFlagsFromString('--expose_gc');
+const gc = vm.runInNewContext('gc');
+const GC_EVERY = 32;
 const freeMb = (dir) => { const s = fs.statfsSync(dir); return Math.round((s.bavail * s.bsize) / 1e6); };
 
 const blobOf = async (ctx, id) => {
@@ -119,7 +126,10 @@ async function exportParts(ctx, db, { gen, part, cloud, started, log }) {
       batch = [];
       await ctx.runMutation(internal.data.addFiles, { gen, files });
     };
+    let n = 0;
+    gc();
     for (const [key, buf] of exportFiles(db, { cloud, log, parts: [EXPORT_PARTS[i]] })) {
+      if (++n % GC_EVERY === 0) gc();
       const p = store(ctx, buf).then(async (storageId) => {
         batch.push({ key, storageId });
         if (batch.length >= FILES_BATCH) await flush();
@@ -176,6 +186,7 @@ export const run = internalAction({
         imported++;
       }
       prune(db);
+      gc();
       log(`importate: ${imported} fisiere (${Math.round((Date.now() - started) / 1000)} s, ${mb()})`);
 
       for (const cc of COUNTRIES) {

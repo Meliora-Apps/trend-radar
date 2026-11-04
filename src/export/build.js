@@ -120,8 +120,15 @@ export function* exportFiles(db, { log = console.log, cloud = null, parts = EXPO
   if (parts.includes('lists')) {
     yield ['meta', gz({ generatedAt: new Date().toISOString(), countries: COUNTRIES, categories: views.categories(), status: views.status(), cloud })];
     const t = Date.now();
-    for (const [key, fn] of listVariants()) yield [key, gz(fn(views))];
+    let prev = null;
+    for (const [key, fn] of listVariants()) {
+      const cc = key.split('/')[1];
+      if (prev && cc !== prev && prev !== 'ALL') views.release(prev);
+      prev = cc;
+      yield [key, gz(fn(views))];
+    }
     views.forget();
+    for (const cc of COUNTRIES) views.release(cc);
     log(`liste: ${Date.now() - t} ms`);
   }
 

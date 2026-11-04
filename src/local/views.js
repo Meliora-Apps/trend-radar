@@ -72,15 +72,21 @@ export function makeViews(db) {
   };
   let version = 0;
   const cache = new Map();
+  const bigCache = new Map();
+  // Cuvintele "mari" ale tarii (scutite de penalizare): mici, tinute separat de serie (paginile cuvintelor n-au nevoie de serie).
+  const bigOf = (cc) => {
+    const key = `${cc}:${version}`;
+    if (!bigCache.has(key)) bigCache.set(key, bigTerms(db, cc));
+    return bigCache.get(key);
+  };
   const ctx = (cc) => {
     const key = `${cc}:${version}`;
     if (!cache.has(key)) {
-      const big = bigTerms(db, cc);
+      const big = bigOf(cc);
       cache.set(key, { big, series: loadSeries(db, cc, SERIES_DAYS, big), index: loadIndex(db, cc) });
     }
     return cache.get(key);
   };
-  const bigOf = (cc) => ctx(cc).big;
   // Bucatile pe tara ale listelor: lista "ALL" le refoloseste pe cele ale tarilor (exportul le cere pe toate).
   const memoCache = new Map();
   const memo = (key, fn) => {
@@ -167,9 +173,12 @@ export function makeViews(db) {
     let rows = [];
     const meta = {};
     for (const cc of ccs) {
-      const { series, index } = ctx(cc);
-      meta[cc] = { warmup: warmup(series.dates), latest: series.dates.at(-1) ?? null };
+      meta[cc] = memo(`meta:${cc}`, () => {
+        const { dates } = ctx(cc).series;
+        return { warmup: warmup(dates), latest: dates.at(-1) ?? null };
+      });
       const list = memo(`view:${cc}:${name}:${p}`, () => {
+        const { series, index } = ctx(cc);
         let l;
         if (name === 'new') l = newTerms(series, index, p).map((r) => ({ ...r, origin: origin(cc, r.term, r.firstSeen) }));
         else if (name === 'rising') l = rising(series, p >= 30 ? 30 : 7);
@@ -687,7 +696,9 @@ export function makeViews(db) {
   return {
     view, themeView, termView, suggestTerms, appKeywords, newApps, appRanks, nicheView, breakoutView, changesView, appExtra, termApps,
     categories, status, bigOf, velocity,
-    invalidate: () => { version++; cache.clear(); velCache.clear(); memoCache.clear(); },
+    invalidate: () => { version++; cache.clear(); velCache.clear(); memoCache.clear(); bigCache.clear(); },
     forget: () => memoCache.clear(), // dupa liste: bucatile pe tara nu mai trebuie
+    // Dupa listele unei tari: seria si ritmurile ei nu mai trebuie (lista ALL foloseste doar bucatile deja calculate).
+    release: (cc) => { cache.delete(`${cc}:${version}`); velCache.delete(`${cc}:${version}`); },
   };
 }
