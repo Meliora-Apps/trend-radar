@@ -62,4 +62,43 @@ http.route({
   }),
 });
 
+// Calculul facut pe alt calculator (src/export/remote-calc.js): copia bazei de calcul, apoi fisierele exportului.
+http.route({
+  path: '/ingest/db',
+  method: 'GET',
+  handler: httpAction(async (ctx, req) => {
+    if (!authorized(req)) return new Response('unauthorized', { status: 401 });
+    const db = await ctx.runQuery(internal.store.getState, { name: 'db' });
+    const cloud = await ctx.runQuery(internal.store.getState, { name: 'cloud' });
+    const urls = [];
+    for (const id of db?.storageIds ?? []) urls.push(await ctx.storage.getUrl(id));
+    return Response.json({ at: db?.at ?? null, urls, cloud: cloud?.value ?? null });
+  }),
+});
+
+http.route({
+  path: '/ingest/file',
+  method: 'POST',
+  handler: httpAction(async (ctx, req) => {
+    if (!authorized(req)) return new Response('unauthorized', { status: 401 });
+    const q = new URL(req.url).searchParams;
+    const gen = q.get('gen');
+    const key = q.get('key');
+    if (!/^[\dT-]+Z$/.test(gen ?? '') || !/^[\w/.-]+$/.test(key ?? '')) return new Response('gen/key gresite', { status: 400 });
+    const storageId = await ctx.storage.store(await req.blob());
+    await ctx.runMutation(internal.data.addFiles, { gen, files: [{ key, storageId }] });
+    return new Response('ok');
+  }),
+});
+
+http.route({
+  path: '/ingest/commit',
+  method: 'POST',
+  handler: httpAction(async (ctx, req) => {
+    if (!authorized(req)) return new Response('unauthorized', { status: 401 });
+    const { gen } = await req.json();
+    return Response.json({ files: await ctx.runMutation(internal.data.commit, { gen }) });
+  }),
+});
+
 export default http;
