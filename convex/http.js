@@ -91,6 +91,42 @@ http.route({
   }),
 });
 
+// Un fisier zilnic din arhiva (adresa de descarcare).
+http.route({
+  path: '/ingest/raw-get',
+  method: 'GET',
+  handler: httpAction(async (ctx, req) => {
+    if (!authorized(req)) return new Response('unauthorized', { status: 401 });
+    const q = new URL(req.url).searchParams;
+    const r = await ctx.runQuery(internal.store.rawOf, { kind: q.get('kind') ?? '', date: q.get('date') ?? '', country: q.get('country') ?? '' });
+    if (!r) return new Response('lipseste', { status: 404 });
+    return Response.json({ url: await ctx.storage.getUrl(r.storageId), size: r.size });
+  }),
+});
+
+// Un fisier oarecare (bucatile bazei, planurile): intoarce id-ul lui, pentru /ingest/state.
+http.route({
+  path: '/ingest/blob',
+  method: 'POST',
+  handler: httpAction(async (ctx, req) => {
+    if (!authorized(req)) return new Response('unauthorized', { status: 401 });
+    return Response.json({ storageId: await ctx.storage.store(await req.blob()) });
+  }),
+});
+
+// Inlocuieste o stare: baza de calcul ('db'), planul de maine ('plan/<CC>') sau starea colectarii ('cloud').
+http.route({
+  path: '/ingest/state',
+  method: 'POST',
+  handler: httpAction(async (ctx, req) => {
+    if (!authorized(req)) return new Response('unauthorized', { status: 401 });
+    const { name, storageIds, value } = await req.json();
+    if (!/^(db|cloud|plan\/[A-Z]{2})$/.test(name ?? '')) return new Response('stare necunoscuta', { status: 400 });
+    await ctx.runMutation(internal.store.setState, { name, storageIds, value });
+    return new Response('ok');
+  }),
+});
+
 http.route({
   path: '/ingest/commit',
   method: 'POST',
