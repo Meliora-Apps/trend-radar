@@ -24,15 +24,30 @@ if (!SITE || !SECRET) {
 const auth = { authorization: `Bearer ${SECRET}` };
 const json = (body) => ({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
-async function call(route, opts = {}) {
+// Reincearca si la erorile de retea (conexiune taiata), nu doar la raspunsurile 5xx/429.
+async function retry(what, fn) {
   for (let i = 0; ; i++) {
-    const res = await fetch(`${SITE}${route}`, { ...opts, headers: { ...auth, ...opts.headers } });
-    if (res.ok) return res;
-    if (i >= 4 || (res.status < 500 && res.status !== 429)) throw new Error(`${route}: HTTP ${res.status} ${await res.text()}`);
-    await new Promise((r) => setTimeout(r, 2000 * 2 ** i));
+    try {
+      return await fn();
+    } catch (e) {
+      if (i >= 5 || e.fatal) throw e;
+      console.log(`  ${what}: ${e.cause?.code ?? e.message}, reincerc`);
+      await new Promise((r) => setTimeout(r, 2000 * 2 ** i));
+    }
   }
 }
-const download = async (url) => Buffer.from(await (await fetch(url)).arrayBuffer());
+const call = (route, opts = {}) => retry(route.split('?')[0], async () => {
+  const res = await fetch(`${SITE}${route}`, { ...opts, headers: { ...auth, ...opts.headers } });
+  if (res.ok) return res;
+  const err = new Error(`${route}: HTTP ${res.status} ${await res.text()}`);
+  err.fatal = res.status < 500 && res.status !== 429;
+  throw err;
+});
+const download = (url) => retry('descarcare', async () => {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`descarcare: HTTP ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+});
 const blob = async (buf, type = 'application/gzip') => (await (await call('/ingest/blob', { method: 'POST', headers: { 'content-type': type }, body: buf })).json()).storageId;
 const setState = (name, body) => call('/ingest/state', json({ name, ...body }));
 
