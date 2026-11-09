@@ -1,0 +1,6 @@
+/data/
+/local.db
+/local.db-*
+node_modules/
+/dist/
+.env*
