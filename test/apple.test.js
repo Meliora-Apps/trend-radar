@@ -103,3 +103,21 @@ test('parseReviews: stele, text, versiune', () => {
   assert.deepEqual(parseReviews({ feed: { entry: e(3) } }).length, 1);
   assert.deepEqual(parseReviews({ feed: {} }), []);
 });
+
+test('cautarile din mai multe tari impart acelasi ritm (Apple limiteaza pe adresa, nu pe tara)', async () => {
+  const at = [];
+  let t = 0;
+  const sleep = async (ms) => { t += ms; };
+  const now = () => t;
+  const fetchImpl = async (url) => {
+    if (url.includes('/search?')) at.push(t);
+    return { ok: true, json: async () => ({ results: [] }) };
+  };
+  const searchThrottle = makeThrottle(3000, { sleep, now });
+  const opts = { fetchImpl, searchThrottle, retry: makeRetry({ retries: 0 }) };
+  const us = makeAppleClient(opts);
+  const de = makeAppleClient(opts);
+  await Promise.all([us.topApps('a', 'US'), de.topApps('b', 'DE'), us.upcoming('c', 'US', '2026-11-09'), de.topApps('d', 'DE')]);
+  assert.equal(at.length, 4);
+  for (let i = 1; i < at.length; i++) assert.ok(at[i] - at[i - 1] >= 3000, `pauza ${at[i] - at[i - 1]} ms intre cautari`);
+});

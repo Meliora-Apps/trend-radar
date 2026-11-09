@@ -5,10 +5,12 @@ import { internalAction, internalMutation, internalQuery } from './_generated/se
 import { internal } from './_generated/api';
 import { v } from 'convex/values';
 import { COUNTRIES, makeAppleClient } from '../src/apple/clients.js';
-import { makeRetry } from '../src/apple/net.js';
+import { makeRetry, makeThrottle } from '../src/apple/net.js';
 import { newJob, phaseItems, preparePhase, work } from '../src/collect/worker.js';
 import { todayUTC } from '../src/util/dates.js';
 
+// Toate tarile impreuna: ~19 cautari iTunes pe minut (probat din Convex pe 9 nov: 1 flux la 3 s = 45/45 OK; 6 fluxuri la 4 s = 429/403 dupa ~48 de cereri).
+const SEARCH_SHARED_MS = 3200;
 const TICK_MS = 4 * 60_000; // o bucata de lucru (plus reincercarile in curs: max ~2 min)
 const LEASE_MS = 9 * 60_000; // cat timp o bucata are colectarea "rezervata"
 const MAX_TICKS = 300; // peste atat (~20 ore), ceva e gresit: ziua se marcheaza esuata
@@ -95,10 +97,12 @@ export const tick = internalAction({
     }
     if (preps.length) await ctx.runMutation(internal.collect.savePrep, { preps });
 
-    // 2. Tarile lucreaza in paralel, fiecare cu ritmul ei (ca pe calculatoare separate).
+    // 2. Tarile lucreaza in paralel, fiecare cu ritmul ei, dar cautarile iTunes trec prin acelasi ritm:
+    //    Apple le limiteaza pe adresa (~20/min), iar toate tarile ies de pe aceeasi adresa.
+    const searchThrottle = makeThrottle(SEARCH_SHARED_MS);
     const updates = await Promise.all(jobs.filter((j) => j.job.phase !== 'done').map(async (j) => {
       const prep = j.prepId ? await loadJson(ctx, j.prepId) : null;
-      const apple = makeAppleClient({ retry: makeRetry({ retries: 3, baseDelayMs: 15_000, log }) });
+      const apple = makeAppleClient({ searchThrottle, retry: makeRetry({ retries: 3, baseDelayMs: 15_000, log }) });
       const phase = j.job.phase;
       const r = await work(j.job, { apple, items: phaseItems(j.job, prep), prep, deadline, log });
       const partId = r.out.length ? await storeJson(ctx, r.out) : null;

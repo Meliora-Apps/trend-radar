@@ -161,15 +161,19 @@ export function parseReviews(json) {
 }
 
 // Throttle-uri separate: hints/RSS tolereaza ~50/min, iTunes Search ~20/min.
+// iTunes Search limiteaza pe ADRESA, nu pe tara: cand mai multe tari lucreaza in paralel de pe acelasi calculator,
+// le dam acelasi `searchThrottle` (altfel 6 tari x 15/min = 90/min si Apple raspunde 429, apoi 403).
 export function makeAppleClient({
   fetchImpl = fetch,
   lightMs = 1200,
   searchMs = 4000,
+  searchThrottle = null,
   retry = makeRetry(),
   counter = makeCounter(),
 } = {}) {
   const light = makeThrottle(lightMs);
   const heavy = makeThrottle(searchMs);
+  const search = searchThrottle ?? heavy;
   const call = (throttle, what, url, opts, parse) =>
     counter.track(() => retry(() => throttle(async () => {
       const res = await fetchImpl(url, opts);
@@ -191,12 +195,12 @@ export function makeAppleClient({
     topApps(term, country) {
       const url = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}`
         + `&country=${country.toLowerCase()}&media=software&entity=software&limit=10&lang=en_us${fresh()}`;
-      return call(heavy, 'search', url, {}, async (r) => parseSearch(await r.json()));
+      return call(search, 'search', url, {}, async (r) => parseSearch(await r.json()));
     },
     upcoming(term, country, after) {
       const url = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}`
         + `&country=${country.toLowerCase()}&media=software&entity=software&limit=200&lang=en_us${fresh()}`;
-      return call(heavy, 'search', url, {}, async (r) => parseUpcoming(await r.json(), after));
+      return call(search, 'search', url, {}, async (r) => parseUpcoming(await r.json(), after));
     },
     chart(country, type, genreId) {
       const url = `https://itunes.apple.com/${country.toLowerCase()}/rss/${type}/limit=100/genre=${genreId}/json`;
