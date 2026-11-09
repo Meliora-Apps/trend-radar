@@ -70,8 +70,11 @@ function upcomingIdsOf(db, cc, latest) {
 // Ce stim despre app-uri inainte de ziua `date` (pentru appFiles din steps.js): id-urile descrise, numele
 // actuale si cifrele ultimei zile (doar versiunea conteaza: pentru "versiune noua").
 export function appState(db, cc, date) {
-  const known = new Set(db.prepare('SELECT id FROM app_meta WHERE country=?').all(cc).map((r) => r.id));
-  const names = new Map(db.prepare('SELECT id, name FROM app_names WHERE country=?').all(cc).map((r) => [r.id, r.name]));
+  // iterate(), nu all(): zeci de mii de randuri (un rand din node:sqlite tine ~430 de octeti).
+  const known = new Set();
+  for (const r of db.prepare('SELECT id FROM app_meta WHERE country=?').iterate(cc)) known.add(r.id);
+  const names = new Map();
+  for (const r of db.prepare('SELECT id, name FROM app_names WHERE country=?').iterate(cc)) names.set(r.id, r.name);
   const last = db.prepare('SELECT MAX(date) d FROM app_stats WHERE country=? AND date<?').get(cc, date).d;
   const prev = {};
   if (last) {

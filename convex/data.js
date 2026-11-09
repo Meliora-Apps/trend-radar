@@ -45,20 +45,24 @@ export const addFiles = internalMutation({
 });
 
 // Trece pe generatia noua, apoi sterge (in loturi) fisierele generatiilor vechi.
+// `expect`: cate fisiere trebuie sa aiba (calculul pe pasi stie exact); o generatie incompleta nu se publica.
+export async function commitGen(ctx, gen, expect = null) {
+  // Generatia trebuie sa aiba toate fisierele de baza (meta + listele + cuvintele); altfel exportul e rupt.
+  const n = (await ctx.db.query('files').withIndex('by_gen_key', (q) => q.eq('gen', gen)).collect()).length;
+  for (const key of ['meta', 'terms', 'term/0', 'app/0']) {
+    if (!await ctx.db.query('files').withIndex('by_gen_key', (q) => q.eq('gen', gen).eq('key', key)).unique()) throw new Error(`generatia ${gen} n-are ${key}`);
+  }
+  if (expect != null && n !== expect) throw new Error(`generatia ${gen} are ${n} fisiere, nu ${expect}`);
+  const cur = await current(ctx);
+  const at = new Date().toISOString();
+  if (cur) await ctx.db.patch(cur._id, { gen, at }); else await ctx.db.insert('state', { name: 'current', gen, at });
+  await ctx.scheduler.runAfter(0, internal.data.cleanup, { keep: gen });
+  return n;
+}
+
 export const commit = internalMutation({
-  args: { gen: v.string() },
-  handler: async (ctx, { gen }) => {
-    // Generatia trebuie sa aiba toate fisierele de baza (meta + listele + cuvintele); altfel exportul e rupt.
-    const n = (await ctx.db.query('files').withIndex('by_gen_key', (q) => q.eq('gen', gen)).collect()).length;
-    for (const key of ['meta', 'terms', 'term/0', 'app/0']) {
-      if (!await ctx.db.query('files').withIndex('by_gen_key', (q) => q.eq('gen', gen).eq('key', key)).unique()) throw new Error(`generatia ${gen} n-are ${key}`);
-    }
-    const cur = await current(ctx);
-    const at = new Date().toISOString();
-    if (cur) await ctx.db.patch(cur._id, { gen, at }); else await ctx.db.insert('state', { name: 'current', gen, at });
-    await ctx.scheduler.runAfter(0, internal.data.cleanup, { keep: gen });
-    return n;
-  },
+  args: { gen: v.string(), expect: v.optional(v.number()) },
+  handler: (ctx, { gen, expect }) => commitGen(ctx, gen, expect),
 });
 
 // Parcurge toate fisierele in pagini si sterge tot ce nu e din generatia `keep` (si incarcarile neterminate).

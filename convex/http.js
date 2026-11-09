@@ -2,6 +2,7 @@ import { httpRouter } from 'convex/server';
 import { httpAction } from './_generated/server';
 import { internal } from './_generated/api';
 import { auth } from './auth';
+import { COUNTRIES } from '../src/apple/clients.js';
 
 const http = httpRouter();
 auth.addHttpRoutes(http);
@@ -62,17 +63,23 @@ http.route({
   }),
 });
 
-// Calculul facut pe alt calculator (src/export/remote-calc.js): copia bazei de calcul, apoi fisierele exportului.
+// Calculul facut pe alt calculator (src/export/remote-calc.js): copiile bazelor tarilor (gzip, in bucati),
+// apoi fisierele exportului.
 http.route({
   path: '/ingest/db',
   method: 'GET',
   handler: httpAction(async (ctx, req) => {
     if (!authorized(req)) return new Response('unauthorized', { status: 401 });
-    const db = await ctx.runQuery(internal.store.getState, { name: 'db' });
+    const countries = {};
+    for (const cc of COUNTRIES) {
+      const db = await ctx.runQuery(internal.store.getState, { name: `db/${cc}` });
+      if (!db) continue;
+      const urls = [];
+      for (const id of db.storageIds) urls.push(await ctx.storage.getUrl(id));
+      countries[cc] = { at: db.at, urls };
+    }
     const cloud = await ctx.runQuery(internal.store.getState, { name: 'cloud' });
-    const urls = [];
-    for (const id of db?.storageIds ?? []) urls.push(await ctx.storage.getUrl(id));
-    return Response.json({ at: db?.at ?? null, urls, cloud: cloud?.value ?? null });
+    return Response.json({ countries, cloud: cloud?.value ?? null });
   }),
 });
 
@@ -114,14 +121,15 @@ http.route({
   }),
 });
 
-// Inlocuieste o stare: baza de calcul ('db'), planul de maine ('plan/<CC>') sau starea colectarii ('cloud').
+// Inlocuieste o stare: baza de calcul a unei tari ('db/<CC>'), planul de maine ('plan/<CC>') sau starea colectarii
+// ('cloud'). Vechea baza cu toate tarile ('db') nu se mai scrie: calculul pe tari o sterge.
 http.route({
   path: '/ingest/state',
   method: 'POST',
   handler: httpAction(async (ctx, req) => {
     if (!authorized(req)) return new Response('unauthorized', { status: 401 });
     const { name, storageIds, value } = await req.json();
-    if (!/^(db|cloud|plan\/[A-Z]{2})$/.test(name ?? '')) return new Response('stare necunoscuta', { status: 400 });
+    if (!/^(cloud|(db|plan)\/[A-Z]{2})$/.test(name ?? '')) return new Response('stare necunoscuta', { status: 400 });
     await ctx.runMutation(internal.store.setState, { name, storageIds, value });
     return new Response('ok');
   }),
@@ -132,8 +140,8 @@ http.route({
   method: 'POST',
   handler: httpAction(async (ctx, req) => {
     if (!authorized(req)) return new Response('unauthorized', { status: 401 });
-    const { gen } = await req.json();
-    return Response.json({ files: await ctx.runMutation(internal.data.commit, { gen }) });
+    const { gen, expect } = await req.json();
+    return Response.json({ files: await ctx.runMutation(internal.data.commit, { gen, ...(expect != null ? { expect } : {}) }) });
   }),
 });
 

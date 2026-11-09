@@ -77,9 +77,18 @@ export function openDb(file = ':memory:') {
   return db;
 }
 
+// La unele erori (ex. "database or disk is full") SQLite anuleaza singur tranzactia: ROLLBACK-ul nostru ar
+// arunca "cannot rollback - no transaction is active" si ar ascunde eroarea adevarata.
 export const tx = (db, fn) => {
   db.exec('BEGIN');
-  try { const r = fn(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; }
+  try {
+    const r = fn();
+    db.exec('COMMIT');
+    return r;
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch { /* tranzactia era deja anulata de SQLite */ }
+    throw e;
+  }
 };
 
 function importDay(db, day) {
@@ -190,12 +199,13 @@ export const isImported = (db, { kind, date, country, size }) =>
 const PATHS = { days: dayPath, classify: classifyPath, apps: appsPath, stats: statsPath, changes: changesPath };
 
 // Importa din data/ doar fisierele noi sau schimbate (dupa marime). Fisierele stricate ajung in `problems`.
-export function importAll(db, dataDir, { prune: doPrune = true } = {}) {
+// `countries`: doar aceste tari (baza unei singure tari, ca in Convex: vezi convex/process.js).
+export function importAll(db, dataDir, { prune: doPrune = true, countries = COUNTRIES } = {}) {
   const stats = { days: 0, classify: 0, apps: 0, stats: 0, changes: 0, problems: 0 };
   const problem = db.prepare('INSERT OR REPLACE INTO problems VALUES (?,?)');
   for (const kind of KINDS) {
     for (const date of listDates(dataDir, kind)) {
-      for (const country of COUNTRIES) {
+      for (const country of countries) {
         const file = PATHS[kind](dataDir, date, country);
         if (!fs.existsSync(file)) continue;
         const size = fs.statSync(file).size;

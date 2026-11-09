@@ -1,5 +1,5 @@
 // Clientii Apple: sugestii (hints), cautare (iTunes Search), topuri (RSS), lookup.
-import { HttpError, makeThrottle, makeRetry, makeCounter } from './net.js';
+import { HttpError, makeThrottle, makeRetry, makeCounter, withTimeout } from './net.js';
 
 export const COUNTRIES = ['US', 'GB', 'DE', 'FR', 'IT', 'ES'];
 export const STOREFRONTS = { US: 143441, GB: 143444, DE: 143443, FR: 143442, IT: 143450, ES: 143454 };
@@ -163,6 +163,9 @@ export function parseReviews(json) {
 // Throttle-uri separate: hints/RSS tolereaza ~50/min, iTunes Search ~20/min.
 // iTunes Search limiteaza pe ADRESA, nu pe tara: cand mai multe tari lucreaza in paralel de pe acelasi calculator,
 // le dam acelasi `searchThrottle` (altfel 6 tari x 15/min = 90/min si Apple raspunde 429, apoi 403).
+// `pacers` (vezi makePacer): ritmuri comune mai multor clienti, pe servicii ({ hints, rss, search, lookup }),
+// in locul throttle-urilor proprii; la 429 incetinesc pe toata lumea.
+export const FETCH_TIMEOUT_MS = 30_000;
 export function makeAppleClient({
   fetchImpl = fetch,
   lightMs = 1200,
@@ -170,16 +173,30 @@ export function makeAppleClient({
   searchThrottle = null,
   retry = makeRetry(),
   counter = makeCounter(),
+  pacers = null,
+  timeoutMs = FETCH_TIMEOUT_MS,
 } = {}) {
   const light = makeThrottle(lightMs);
   const heavy = makeThrottle(searchMs);
   const search = searchThrottle ?? heavy;
-  const call = (throttle, what, url, opts, parse) =>
-    counter.track(() => retry(() => throttle(async () => {
-      const res = await fetchImpl(url, opts);
-      if (!res.ok) throw new HttpError(res.status, what);
-      return parse(res);
-    })));
+  const call = (throttle, what, url, opts, parse) => {
+    const pacer = pacers?.[what];
+    const once = async () => {
+      const r = await withTimeout(timeoutMs, what, async (signal) => {
+        const res = await fetchImpl(url, signal ? { ...opts, signal } : opts);
+        if (!res.ok) return { status: res.status };
+        return { value: await parse(res) };
+      });
+      if (r.status) {
+        // 403 la cautare = limita Apple de cereri pe minut (vezi SEARCH_BLOCKED_AFTER in src/collect/worker.js).
+        if (r.status === 429 || (r.status === 403 && what === 'search')) pacer?.slow();
+        throw new HttpError(r.status, what);
+      }
+      pacer?.ok();
+      return r.value;
+    };
+    return counter.track(() => retry(() => (pacer ? pacer.wait().then(once) : throttle(once))));
+  };
 
   // Akamai tine raspunsurile search/lookup pana la 24h: fara asta, cifrele "de azi" pot fi de ieri
   // (iar rating-urile pe zi ar sari aiurea). Un parametru nou la fiecare cerere = raspuns proaspat.

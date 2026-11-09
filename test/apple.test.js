@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseHints, parseSearch, parseChart, parseAppMeta, parseIap, parseSimilar, parseReviews, makeAppleClient } from '../src/apple/clients.js';
-import { makeThrottle, makeRetry, makeCounter, HttpError } from '../src/apple/net.js';
+import { makeThrottle, makeRetry, makeCounter, makePacer, HttpError, OutOfTime } from '../src/apple/net.js';
 
 const HINTS = `<?xml version="1.0"?><plist version="1.0"><dict><key>title</key><string>Suggestions</string>
 <key>hints</key><array>
@@ -102,6 +102,78 @@ test('parseReviews: stele, text, versiune', () => {
   assert.deepEqual(parseReviews({ feed: { entry: [e(1), e(5)] } }).map((r) => [r.stars, r.title, r.date]), [[1, 'T1', '2026-10-19'], [5, 'T5', '2026-10-19']]);
   assert.deepEqual(parseReviews({ feed: { entry: e(3) } }).length, 1);
   assert.deepEqual(parseReviews({ feed: {} }), []);
+});
+
+// Un ceas de proba: sleep avanseaza timpul, fara asteptari reale.
+function fakeClock() {
+  let t = 0;
+  return { now: () => t, sleep: async (ms) => { t += ms; } };
+}
+
+test('pacer: cererile pornesc la interval, chiar daca sunt simultane; 429 = pauza comuna si ritm mai rar', async () => {
+  const slept = [];
+  const p0 = makePacer(100, { now: () => 0, sleep: async (ms) => { slept.push(ms); } });
+  await Promise.all([p0.wait(), p0.wait(), p0.wait()]);
+  assert.deepEqual(slept, [100, 200], 'pornesc la 0, 100, 200 fara sa astepte una dupa alta');
+
+  const c = fakeClock();
+  const p = makePacer(100, { maxMs: 1000, pauseMs: 5000, ...c });
+  await p.wait();
+  p.slow();
+  assert.deepEqual(p.stats(), { intervalMs: 150, pauses: 1 });
+  await p.wait();
+  assert.ok(c.now() >= 5000, `dupa pauza (${c.now()})`);
+  for (let i = 0; i < 100; i++) p.ok();
+  assert.equal(p.stats().intervalMs, 100, 'revine la ritmul de baza');
+  for (let i = 0; i < 20; i++) p.slow();
+  assert.equal(p.stats().intervalMs, 1000, 'cel mult maxMs');
+});
+
+test('client cu pacer comun: 429 incetineste pacerul, reincercarea trece dupa pauza; cererea agatata expira', async () => {
+  const c = fakeClock();
+  const hints = makePacer(10, { pauseMs: 1000, ...c });
+  let n = 0;
+  const fetchImpl = async () => (++n === 1 ? { ok: false, status: 429 } : { ok: true, text: async () => HINTS });
+  const apple = makeAppleClient({ fetchImpl, pacers: { hints }, retry: makeRetry({ retries: 2, rateLimitDelayMs: 0, sleep: c.sleep }) });
+  assert.deepEqual(await apple.suggest('ai', 'US'), ['ai chat', 'tom & jerry']);
+  assert.equal(n, 2);
+  assert.equal(hints.stats().pauses, 1);
+  assert.ok(c.now() >= 1000);
+
+  const hung = makeAppleClient({ fetchImpl: () => new Promise(() => {}), lightMs: 0, timeoutMs: 20, retry: makeRetry({ retries: 0 }) });
+  await assert.rejects(hung.suggest('ai', 'US'), /fara raspuns/);
+});
+
+test('client: 403 la cautare nu se reincearca, dar incetineste ritmul comun al cautarii (limita Apple pe minut)', async () => {
+  let n = 0;
+  const apple = makeAppleClient({ fetchImpl: async () => { n++; return { ok: false, status: 403 }; }, searchMs: 0, retry: makeRetry({ retries: 3, baseDelayMs: 1 }) });
+  await assert.rejects(apple.topApps('x', 'US'), (e) => e.status === 403);
+  assert.equal(n, 1);
+
+  const c = fakeClock();
+  const search = makePacer(100, { pauseMs: 1000, ...c });
+  const lookup = makePacer(100, { pauseMs: 1000, ...c });
+  const paced = makeAppleClient({ fetchImpl: async () => ({ ok: false, status: 403 }), pacers: { search, lookup }, retry: makeRetry({ retries: 3, baseDelayMs: 1, sleep: c.sleep }) });
+  await assert.rejects(paced.topApps('x', 'US'), (e) => e.status === 403);
+  assert.deepEqual(search.stats(), { intervalMs: 150, pauses: 1 });
+  // In afara cautarii, un 403 nu e limita de ritm.
+  await assert.rejects(paced.appMeta([1], 'US'), (e) => e.status === 403);
+  assert.deepEqual(lookup.stats(), { intervalMs: 100, pauses: 0 });
+});
+
+test('pacer cu until: cererea care ar porni dupa sfarsitul bucatii iese imediat, fara reincercare si fara sa fie numarata', async () => {
+  const c = fakeClock();
+  const p = makePacer(1000, { until: 2500, ...c });
+  await Promise.all([p.wait(), p.wait(), p.wait()]); // pornesc la 0, 1000, 2000
+  await assert.rejects(p.wait(), (e) => e instanceof OutOfTime && e.outOfTime);
+  assert.equal(c.now(), 2000, 'nu asteapta degeaba pana dupa sfarsitul bucatii');
+
+  let n = 0;
+  const search = makePacer(1000, { until: 0, ...c });
+  const apple = makeAppleClient({ fetchImpl: async () => { n++; return { ok: true, json: async () => ({ results: [] }) }; }, pacers: { search }, retry: makeRetry({ retries: 3, baseDelayMs: 1, sleep: c.sleep }) });
+  await assert.rejects(apple.topApps('x', 'US'), (e) => e.outOfTime);
+  assert.equal(n, 0, 'cererea nu pleaca');
+  assert.deepEqual(apple.counter.stats, { requests: 0, failures: 0 });
 });
 
 test('cautarile din mai multe tari impart acelasi ritm (Apple limiteaza pe adresa, nu pe tara)', async () => {

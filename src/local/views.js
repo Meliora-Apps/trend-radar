@@ -31,31 +31,46 @@ export const LIFETIME_MAX_DAYS = 365;
 // Ele pastreaza scorul intreg chiar daca apar doar dupa o combinatie rara de litere ("vpn", "nfl").
 export function bigTerms(db, cc) {
   const big = new Set();
-  for (const r of db.prepare('SELECT term, niche FROM class WHERE country=? AND niche IS NOT NULL').all(cc)) {
+  for (const r of db.prepare('SELECT term, niche FROM class WHERE country=? AND niche IS NOT NULL').iterate(cc)) {
     if ((JSON.parse(r.niche).tmax ?? 0) >= BIG_RATINGS) big.add(r.term);
   }
   return big;
 }
 export const pickScore = (big, term, score, adj) => (big.has(term) || adj == null ? score : adj);
 
+// Lista de categorii a interfetei, din categoriile folosite in clasificari (Set de id-uri).
+export function categoriesFrom(used) {
+  return [
+    ...Object.keys(GENRES).map(Number).filter((g) => used.has(g)).map((g) => ({ id: g, name: genreName(g) }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    ...(used.has(0) ? [{ id: 0, name: 'Mixt' }] : []),
+  ];
+}
+
+// Ultimele `days` zile complete ale tarii, in ordine.
+export const completeDates = (db, cc, days) => db.prepare(
+  'SELECT date FROM days WHERE country=? AND complete=1 ORDER BY date DESC LIMIT ?',
+).all(cc, days).map((r) => r.date).reverse();
+
+// Randurile mari se citesc cu iterate(), nu cu all(): un rand din node:sqlite tine ~430 de octeti, iar all()
+// le tine pe toate odata (sute de mii de randuri = sute de MB, peste memoria unei actiuni Convex).
 export function loadSeries(db, cc, days = SERIES_DAYS, big = bigTerms(db, cc)) {
-  const dates = db.prepare(
-    'SELECT date FROM days WHERE country=? AND complete=1 ORDER BY date DESC LIMIT ?',
-  ).all(cc, days).map((r) => r.date).reverse();
+  const dates = completeDates(db, cc, days);
   const scores = new Map(dates.map((d) => [d, new Map()]));
   if (dates.length) {
-    const rows = db.prepare('SELECT date, term, score, score_adj FROM scores WHERE country=? AND date>=?').all(cc, dates[0]);
-    for (const r of rows) scores.get(r.date)?.set(r.term, pickScore(big, r.term, r.score, r.score_adj));
+    for (const r of db.prepare('SELECT date, term, score, score_adj FROM scores WHERE country=? AND date>=?').iterate(cc, dates[0])) {
+      scores.get(r.date)?.set(r.term, pickScore(big, r.term, r.score, r.score_adj));
+    }
   }
   return { dates, scores };
 }
 
 export function loadIndex(db, cc) {
   const index = new Map();
-  for (const r of db.prepare('SELECT term, first_seen, last_seen FROM seen WHERE country=?').all(cc)) {
+  for (const r of db.prepare('SELECT term, first_seen, last_seen FROM seen WHERE country=?').iterate(cc)) {
     index.set(r.term, { firstSeen: r.first_seen, lastSeen: r.last_seen });
   }
-  for (const r of db.prepare('SELECT * FROM class WHERE country=?').all(cc)) {
+  for (const r of db.prepare('SELECT * FROM class WHERE country=?').iterate(cc)) {
     const e = index.get(r.term);
     if (e) Object.assign(e, { category: r.category, subgenre: r.subgenre, difficulty: r.difficulty, topAppIds: JSON.parse(r.top_app_ids) });
   }
@@ -70,13 +85,20 @@ const GAMES = 6014;
 const COMPANION_PUB = 100_000;
 
 // Cache pe tara, invalidat la fiecare import (versiune).
-export function makeViews(db, { spill = false } = {}) {
-  // Cererile SQL pregatite o singura data (fiecare cerere pregatita tine memorie in SQLite pana e stearsa de GC).
+// Calculul pe tari (src/export/split.js): memoSink primeste fiecare bucata calculata (cheie fara versiune), iar
+// memoSource da bucatile deja calculate de alta parte; cu db = null vederile folosesc doar bucatile date.
+export function makeViews(db, { spill = false, memoSource = null, memoSink = null } = {}) {
+  // Cererile SQL pregatite o singura data (fiecare cerere pregatita tine memorie in SQLite pana e stearsa de GC),
+  // la prima folosire: fara baza, o cerere ajunsa pana aici inseamna o bucata care lipseste.
   const stmts = new Map();
-  const q = (sql) => {
-    if (!stmts.has(sql)) stmts.set(sql, db.prepare(sql));
+  const prep = (sql) => {
+    if (!stmts.has(sql)) {
+      if (!db) throw new Error(`vederi fara baza: lipseste o bucata calculata (${sql.slice(0, 60)})`);
+      stmts.set(sql, db.prepare(sql));
+    }
     return stmts.get(sql);
   };
+  const q = (sql) => ({ get: (...a) => prep(sql).get(...a), all: (...a) => prep(sql).all(...a), iterate: (...a) => prep(sql).iterate(...a) });
   let version = 0;
   const cache = new Map();
   const bigCache = new Map();
@@ -109,9 +131,12 @@ export function makeViews(db, { spill = false } = {}) {
     if (memoCache.has(k)) return memoCache.get(k);
     const saved = spillGet?.get(k);
     if (saved) return JSON.parse(saved.v);
+    const given = memoSource?.(key);
+    if (given !== undefined) return given;
     const value = fn();
     memoCache.set(k, value);
     spillPut?.run(k, JSON.stringify(value));
+    memoSink?.(key, value);
     return value;
   };
 
@@ -127,9 +152,9 @@ export function makeViews(db, { spill = false } = {}) {
     if (latest) {
       const byId = new Map();
       for (const r of q('SELECT id, date, ratings, stars, price FROM app_stats WHERE country=? AND date>=? ORDER BY date')
-        .all(cc, addDays(latest, -14))) {
+        .iterate(cc, addDays(latest, -14))) {
         if (!byId.has(r.id)) byId.set(r.id, []);
-        byId.get(r.id).push(r);
+        byId.get(r.id).push({ date: r.date, ratings: r.ratings, stars: r.stars, price: r.price }); // copie mica (vezi loadSeries)
       }
       const rate = (a, b) => { const d = diffDays(b.date, a.date); return d > 0 ? Math.max(0, (b.ratings - a.ratings) / d) : null; };
       const round = (v) => (v == null ? null : Math.round(v * 10) / 10);
@@ -275,30 +300,32 @@ export function makeViews(db, { spill = false } = {}) {
 
   function termView(term) {
     const t = term.trim().toLowerCase();
-    const perCountry = COUNTRIES.map((cc) => {
-      const big = bigOf(cc);
-      const history = historyQ.all(t, cc, scoreStart(cc)).reverse()
-        .map((h) => ({ date: h.date, score: pickScore(big, t, h.score, h.score_adj) }));
-      const seen = seenQ.get(cc, t);
-      // Ultima observatie = cea din ziua last_seen (daca ziua mai e in baza).
-      const lastRow = seen ? obsQ.get(cc, seen.last_seen, t) : null;
-      const last = lastRow ? { date: lastRow.date, prefix: lastRow.prefix, position: lastRow.position,
-        score: pickScore(big, t, lastRow.score, lastRow.score_adj), rare: !big.has(t) && lastRow.score_adj != null && lastRow.score_adj < lastRow.score } : null;
-      const cls = classQ.get(cc, t);
-      return {
-        country: cc, history, last: last ?? null,
-        firstSeen: seen?.first_seen ?? null, lastSeen: seen?.last_seen ?? null,
-        category: cls ? genreName(cls.category) : null,
-        subgenre: cls?.subgenre ? genreName(cls.subgenre) : null,
-        difficulty: cls?.difficulty ?? null,
-        topAppIds: cls ? JSON.parse(cls.top_app_ids) : [],
-        niche: cls?.niche ? JSON.parse(cls.niche) : null,
-        competition: cls?.niche ? competition(JSON.parse(cls.niche)) : null,
-        chance: cls?.niche ? chance(JSON.parse(cls.niche)) : null,
-        market: cls ? nicheMarket(cc, JSON.parse(cls.top_app_ids)) : null,
-      };
-    });
-    return { term: t, countries: perCountry, saturated: saturated(t) };
+    return { term: t, countries: COUNTRIES.map((cc) => termEntry(cc, t)), saturated: saturated(t) };
+  }
+
+  // Partea unei tari din pagina cuvantului (exportul pe tari o calculeaza separat, vezi src/export/split.js).
+  function termEntry(cc, t) {
+    const big = bigOf(cc);
+    const history = historyQ.all(t, cc, scoreStart(cc)).reverse()
+      .map((h) => ({ date: h.date, score: pickScore(big, t, h.score, h.score_adj) }));
+    const seen = seenQ.get(cc, t);
+    // Ultima observatie = cea din ziua last_seen (daca ziua mai e in baza).
+    const lastRow = seen ? obsQ.get(cc, seen.last_seen, t) : null;
+    const last = lastRow ? { date: lastRow.date, prefix: lastRow.prefix, position: lastRow.position,
+      score: pickScore(big, t, lastRow.score, lastRow.score_adj), rare: !big.has(t) && lastRow.score_adj != null && lastRow.score_adj < lastRow.score } : null;
+    const cls = classQ.get(cc, t);
+    return {
+      country: cc, history, last: last ?? null,
+      firstSeen: seen?.first_seen ?? null, lastSeen: seen?.last_seen ?? null,
+      category: cls ? genreName(cls.category) : null,
+      subgenre: cls?.subgenre ? genreName(cls.subgenre) : null,
+      difficulty: cls?.difficulty ?? null,
+      topAppIds: cls ? JSON.parse(cls.top_app_ids) : [],
+      niche: cls?.niche ? JSON.parse(cls.niche) : null,
+      competition: cls?.niche ? competition(JSON.parse(cls.niche)) : null,
+      chance: cls?.niche ? chance(JSON.parse(cls.niche)) : null,
+      market: cls ? nicheMarket(cc, JSON.parse(cls.top_app_ids)) : null,
+    };
   }
 
   // Cuvintele pe care app-ul apare in primele 10 (din clasificarile noastre), pe tari.
@@ -445,22 +472,30 @@ export function makeViews(db, { spill = false } = {}) {
     return { total: out.length, rows: out.slice(0, limit) };
   }
 
+  // Bucata unei tari din feedApps (lista ALL refoloseste bucatile tarilor): lansarile din ultimele `days` zile, fara cele din topuri.
+  function feedFor(cc, days) {
+    const out = [];
+    const latest = q('SELECT MAX(date) d FROM days WHERE country=?').get(cc).d;
+    if (!latest) return out;
+    const inCharts = new Set(q('SELECT DISTINCT app_id FROM charts WHERE country=? AND date=?').all(cc, latest).map((r) => r.app_id));
+    const rows = q(`SELECT f.app_id id, MIN(f.date) first_feed, MAX(f.date) last_feed, MAX(f.type) type,
+          m.name, m.genre_id, m.release_date, m.seller
+        FROM new_feed f JOIN app_meta m ON m.country=f.country AND m.id=f.app_id
+        WHERE f.country=? AND f.date>=? GROUP BY f.app_id`).all(cc, addDays(latest, -days));
+    for (const r of rows) {
+      if (inCharts.has(r.id)) continue;
+      out.push({ r, entry: { country: cc, firstInFeed: r.first_feed, type: r.type, ...ratingTrend(cc, r.id, latest) } });
+    }
+    return out;
+  }
+
   // Lansarile noi ale Apple (din prima zi) care inca nu sunt in topurile urmarite.
   function feedApps({ country = 'US', category = 'all', launched = 90, limit = MAX_ROWS }) {
     const ccs = country === 'ALL' ? COUNTRIES : [country];
     const days = Number(launched) || 90;
     const byId = new Map();
     for (const cc of ccs) {
-      const latest = q('SELECT MAX(date) d FROM days WHERE country=?').get(cc).d;
-      if (!latest) continue;
-      const inCharts = new Set(q('SELECT DISTINCT app_id FROM charts WHERE country=? AND date=?').all(cc, latest).map((r) => r.app_id));
-      const rows = q(`SELECT f.app_id id, MIN(f.date) first_feed, MAX(f.date) last_feed, MAX(f.type) type,
-          m.name, m.genre_id, m.release_date, m.seller
-        FROM new_feed f JOIN app_meta m ON m.country=f.country AND m.id=f.app_id
-        WHERE f.country=? AND f.date>=? GROUP BY f.app_id`).all(cc, addDays(latest, -days));
-      for (const r of rows) {
-        if (inCharts.has(r.id)) continue;
-        const entry = { country: cc, firstInFeed: r.first_feed, type: r.type, ...ratingTrend(cc, r.id, latest) };
+      for (const { r, entry } of memo(`feed:${cc}:${days}`, () => feedFor(cc, days))) {
         const cur = byId.get(r.id);
         if (!cur) byId.set(r.id, { r, all: [entry] });
         else cur.all.push(entry);
@@ -554,12 +589,18 @@ export function makeViews(db, { spill = false } = {}) {
     return rows;
   }
 
-  const metaOf = (cc) => new Map(q('SELECT id, name, genre_id, release_date, seller FROM app_meta WHERE country=?').all(cc).map((m) => [m.id, m]));
+  const metaOf = (cc) => {
+    const out = new Map();
+    for (const m of q('SELECT id, name, genre_id, release_date, seller FROM app_meta WHERE country=?').iterate(cc)) {
+      out.set(m.id, { id: m.id, name: m.name, genre_id: m.genre_id, release_date: m.release_date, seller: m.seller });
+    }
+    return out;
+  };
   // Cel mai bun loc de azi in topurile de descarcari si in topul incasarilor, pe app.
   function todayRanks(cc) {
     const latest = q('SELECT MAX(date) d FROM charts WHERE country=?').get(cc).d;
     const dl = new Map(), gross = new Map();
-    for (const r of q('SELECT app_id id, type, genre_id, rank FROM charts WHERE country=? AND date=?').all(cc, latest)) {
+    for (const r of q('SELECT app_id id, type, genre_id, rank FROM charts WHERE country=? AND date=?').iterate(cc, latest)) {
       const m = r.type === 'topgrossingapplications' ? gross : dl;
       if (!m.has(r.id) || r.rank < m.get(r.id).rank) m.set(r.id, r);
     }
@@ -658,11 +699,11 @@ export function makeViews(db, { spill = false } = {}) {
         bestRank: d?.rank ?? null, bestChartName: d ? genreName(d.genre_id) : null,
       });
     };
-    for (const c of q('SELECT * FROM app_changes WHERE country=? AND date>=?').all(cc, since)) push(c.id, c.date, c.field, c.from_v, c.to_v, c.notes);
+    for (const c of q('SELECT * FROM app_changes WHERE country=? AND date>=?').iterate(cc, since)) push(c.id, c.date, c.field, c.from_v, c.to_v, c.notes);
     const price = q(`SELECT a.id, a.price now, b.price was FROM app_stats a JOIN app_stats b ON b.country=a.country AND b.id=a.id AND b.date=?
       WHERE a.country=? AND a.date=? AND a.price IS NOT b.price`);
     for (let i = 1; i < dates.length; i++) {
-      for (const r of price.all(dates[i - 1], cc, dates[i])) push(r.id, dates[i], 'price', r.was, r.now);
+      for (const r of price.iterate(dates[i - 1], cc, dates[i])) push(r.id, dates[i], 'price', r.was, r.now);
     }
     return out;
   }
@@ -690,25 +731,28 @@ export function makeViews(db, { spill = false } = {}) {
       .all(`${text.trim().toLowerCase()}%`).map((r) => r.term);
   }
 
+  // Categoriile folosite in clasificari (`country` = doar ale unei tari, pentru exportul pe tari).
+  function usedCategories(country = null) {
+    return (country ? q('SELECT DISTINCT category FROM class WHERE country=?').all(country) : q('SELECT DISTINCT category FROM class').all())
+      .map((r) => r.category);
+  }
+
   function categories() {
-    const used = new Set(q('SELECT DISTINCT category FROM class').all().map((r) => r.category));
-    return [
-      ...Object.keys(GENRES).map(Number).filter((g) => used.has(g)).map((g) => ({ id: g, name: genreName(g) }))
-        .sort((a, b) => a.name.localeCompare(b.name)),
-      ...(used.has(0) ? [{ id: 0, name: 'Mixt' }] : []),
-    ];
+    return categoriesFrom(new Set(usedCategories()));
+  }
+
+  function countryStatus(cc) {
+    const dates = completeDates(db, cc, 1000); // doar zilele, fara seria de scoruri (sute de MB la 100 de zile)
+    const all = q('SELECT COUNT(*) n FROM days WHERE country=?').get(cc).n;
+    const incomplete = q('SELECT date FROM days WHERE country=? AND complete=0 ORDER BY date DESC LIMIT 10').all(cc).map((r) => r.date);
+    const terms = q('SELECT COUNT(*) n FROM seen WHERE country=?').get(cc).n;
+    const classified = q('SELECT COUNT(*) n FROM class WHERE country=?').get(cc).n;
+    return { warmup: warmup(dates), latest: dates.at(-1) ?? null, days: all, incomplete, terms, classified };
   }
 
   function status() {
     const countries = {};
-    for (const cc of COUNTRIES) {
-      const s = loadSeries(db, cc, 1000);
-      const all = q('SELECT COUNT(*) n FROM days WHERE country=?').get(cc).n;
-      const incomplete = q('SELECT date FROM days WHERE country=? AND complete=0 ORDER BY date DESC LIMIT 10').all(cc).map((r) => r.date);
-      const terms = q('SELECT COUNT(*) n FROM seen WHERE country=?').get(cc).n;
-      const classified = q('SELECT COUNT(*) n FROM class WHERE country=?').get(cc).n;
-      countries[cc] = { warmup: warmup(s.dates), latest: s.dates.at(-1) ?? null, days: all, incomplete, terms, classified };
-    }
+    for (const cc of COUNTRIES) countries[cc] = countryStatus(cc);
     const problems = q('SELECT * FROM problems').all();
     return { countries, problems };
   }
@@ -796,7 +840,7 @@ export function makeViews(db, { spill = false } = {}) {
 
   return {
     view, themeView, termView, suggestTerms, appKeywords, newApps, appRanks, nicheView, breakoutView, changesView, upcomingView, appExtra, termApps,
-    categories, status, bigOf, velocity,
+    categories, status, bigOf, velocity, termEntry, countryStatus, usedCategories,
     invalidate: () => { version++; cache.clear(); velCache.clear(); memoCache.clear(); bigCache.clear(); },
     forget: () => memoCache.clear(), // dupa liste: bucatile pe tara nu mai trebuie
     // Dupa listele unei tari: seria si ritmurile ei nu mai trebuie (lista ALL foloseste doar bucatile deja calculate).
