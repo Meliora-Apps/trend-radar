@@ -664,6 +664,7 @@ async function renderApp() {
         <div class="muted small" style="margin-top:12px">Limbi: ${esc(d.languages.join(', '))} · Bundle: ${esc(d.bundleId)}</div>
       </div>
     </div>
+    <div class="card panel" style="margin-top:14px" id="live-check"></div>
     <div class="card panel" style="margin-top:14px">
       <div class="panel-head"><h3>Evoluție, zi de zi ${q('Pe fiecare țară. Locul în topuri: #1 = sus, linia se rupe în zilele în care nu era în niciun top. Rating-uri: totalul din fiecare zi; panta arată cât de repede crește (semnul descărcărilor).')}</h3>
         <div class="tabs">${EVO.map(([k, label]) => `<button type="button" class="chip${(state.evo ?? 'downloads') === k ? ' on' : ''}" data-evo="${k}">${label}</button>`).join('')}</div></div>
@@ -678,7 +679,72 @@ async function renderApp() {
   state.ranks = r.ranks;
   drawEvo();
   bindApp();
+  liveCheck({ id: state.appId, country: r.country, name: d.name, subtitle: d.subtitle ?? '', known: r.keywords.filter((k) => k.country === r.country).map((k) => k.term) });
   loadReviews(state.appId, r.country).catch((err) => { if ($('#reviews')) $('#reviews').innerHTML = `<h3>Recenzii recente</h3><div class="empty">Nu am putut încărca recenziile: ${esc(err.message)}</div>`; });
+}
+
+// ---------- Verifica acum: locul real al aplicatiei in cautare (top 200), live ----------
+const CHECK_HELP = 'Caută acum în App Store (top 200) cuvintele probabile ale aplicației: cele unde o știm deja în top 10, '
+  + 'expresiile din titlu și subtitlu și sugestiile App Store pentru cuvintele din nume (aici apar și cuvintele din câmpul ascuns). '
+  + 'Locul e real, din căutarea de acum. Merge în ritmul sigur al Apple (~19 căutări pe minut), deci ~2 minute pentru 40 de cuvinte. '
+  + 'Ultima verificare rămâne salvată.';
+const qs = (o) => Object.entries(o).map(([k, v]) => `${k}=${encodeURIComponent(typeof v === 'string' || typeof v === 'number' ? v : JSON.stringify(v))}`).join('&');
+const checkRun = { key: null };
+
+function checkTable(results, prev) {
+  const before = new Map((prev ?? []).map((x) => [x.term, x.position]));
+  const rows = [...results].sort((a, b) => (a.position ?? 999) - (b.position ?? 999) || a.term.localeCompare(b.term));
+  const found = results.filter((x) => x.position).length;
+  const delta = (x) => {
+    if (!prev || !before.has(x.term)) return '<span class="muted">–</span>';
+    const p = before.get(x.term);
+    if (p === x.position) return '<span class="muted">=</span>';
+    if (!p) return '<span class="badge new">nou</span>';
+    if (!x.position) return '<span class="down">ieșit</span>';
+    return p > x.position ? `<span class="up">▲ ${p - x.position}</span>` : `<span class="down">▼ ${x.position - p}</span>`;
+  };
+  return `<p class="muted small">Apare la <b>${found}</b> din ${results.length} cuvinte verificate.</p>
+    <table><thead><tr><th>Cuvânt</th><th class="num">Loc</th>${prev ? `<th class="num">Față de data trecută</th>` : ''}<th>Sursă ${q('De unde vine cuvântul pentru această aplicație: titlu, subtitlu sau câmpul ascuns de keywords.')}</th></tr></thead>
+    <tbody>${rows.map((x) => `<tr><td class="term"><a data-term="${esc(x.term)}">${esc(x.term)}</a></td>
+      <td class="num">${x.position ? `<b>#${x.position}</b>` : `<span class="muted" ${x.error ? `data-tip="${esc(x.error)}"` : ''}>${x.error ? 'eroare' : 'peste 200'}</span>`}</td>
+      ${prev ? `<td class="num">${delta(x)}</td>` : ''}
+      <td>${x.source ? `<span class="badge src-${x.source}" data-tip="${esc(SOURCE[x.source][1])}">${SOURCE[x.source][0]}</span>` : ''}</td></tr>`).join('')}</tbody></table>`;
+}
+
+async function liveCheck(app) {
+  const box = $('#live-check');
+  if (!box) return;
+  const key = `${app.id}:${app.country}`;
+  const head = (btn) => `<div class="panel-head"><h3>Unde se indexează acum ${q(CHECK_HELP)}</h3>${btn}</div>`;
+  const last = await api(`/api/check-last?${qs({ id: app.id, country: app.country, name: app.name, subtitle: app.subtitle })}`).catch(() => null);
+  if (checkRun.key === key) return; // o verificare e deja in curs (o deseneaza ea)
+  const when = last ? `<span class="muted small">verificat ${new Date(last.at).toLocaleString('ro-RO', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>` : '';
+  box.innerHTML = head(`<span>${when} <button type="button" class="btn" id="check-go">${last ? 'Verifică din nou' : 'Verifică acum'}</button></span>`)
+    + (last ? checkTable(last.results, null) : `<div class="empty">Apasă „Verifică acum” ca să vezi locul real al aplicației în căutare (top 200) la cuvintele ei probabile, în ${esc(app.country)}.</div>`);
+  $('#check-go').addEventListener('click', () => runCheck(app, last).catch((err) => {
+    checkRun.key = null;
+    if ($('#live-check')) $('#live-check').innerHTML = head('') + `<div class="empty">Verificarea s-a oprit: ${esc(err.message)}</div>`;
+  }));
+}
+
+async function runCheck(app, last) {
+  const key = `${app.id}:${app.country}`;
+  checkRun.key = key;
+  const draw = (html) => { if (checkRun.key === key && $('#live-check') && state.appId === app.id && state.appCountry === app.country) $('#live-check').innerHTML = html; };
+  const head = `<div class="panel-head"><h3>Unde se indexează acum ${q(CHECK_HELP)}</h3></div>`;
+  draw(`${head}<div class="empty">Aleg cuvintele de verificat…</div>`);
+  const terms = await api(`/api/check-plan?${qs({ country: app.country, name: app.name, subtitle: app.subtitle, known: app.known })}`);
+  const results = [];
+  for (let i = 0; i < terms.length; i += 6) {
+    const pct = Math.round((i / terms.length) * 100);
+    draw(`${head}<p>Caut în App Store: <b>${i}</b> din ${terms.length} cuvinte… <span class="scorebar"><i style="width:${pct}%"></i></span></p>${results.length ? checkTable(results, last?.results) : ''}`);
+    results.push(...await api(`/api/check-ranks?${qs({ id: app.id, country: app.country, name: app.name, subtitle: app.subtitle, terms: terms.slice(i, i + 6) })}`));
+  }
+  const ok = results.filter((x) => !x.error);
+  if (ok.length) await api(`/api/check-save?${qs({ id: app.id, country: app.country, results: ok.map(({ term, position, total }) => ({ term, position, total })) })}`).catch(() => {});
+  checkRun.key = null;
+  draw(`<div class="panel-head"><h3>Unde se indexează acum ${q(CHECK_HELP)}</h3><span><span class="muted small">verificat acum</span> <button type="button" class="btn" id="check-go">Verifică din nou</button></span></div>${checkTable(results, last?.results)}`);
+  $('#check-go')?.addEventListener('click', () => runCheck(app, { results: ok }).catch(() => { checkRun.key = null; }));
 }
 
 const EVO = [['downloads', 'Loc în topuri'], ['grossing', 'Topul încasărilor'], ['ratings', 'Rating-uri']];

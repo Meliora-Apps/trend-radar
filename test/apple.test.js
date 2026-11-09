@@ -121,3 +121,13 @@ test('cautarile din mai multe tari impart acelasi ritm (Apple limiteaza pe adres
   assert.equal(at.length, 4);
   for (let i = 1; i < at.length; i++) assert.ok(at[i] - at[i - 1] >= 3000, `pauza ${at[i] - at[i - 1]} ms intre cautari`);
 });
+
+test('client.searchRank: locul app-ului in primele 200, null daca lipseste', async () => {
+  let seen;
+  const fetchImpl = async (url) => { seen = url; return { ok: true, json: async () => ({ results: [{ trackId: 5 }, { trackId: 9 }, { trackId: 7 }] }) }; };
+  const apple = makeAppleClient({ fetchImpl, searchMs: 0, retry: makeRetry({ retries: 0 }) });
+  assert.deepEqual(await apple.searchRank('theory test', 'GB', 7), { position: 3, total: 3 });
+  assert.deepEqual(await apple.searchRank('theory test', 'GB', '9'), { position: 2, total: 3 });
+  assert.deepEqual(await apple.searchRank('x', 'GB', 1), { position: null, total: 3 });
+  assert.match(seen, /country=gb&.*limit=200/);
+});

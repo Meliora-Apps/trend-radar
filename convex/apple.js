@@ -3,7 +3,8 @@ import { action, internalQuery } from './_generated/server';
 import { internal } from './_generated/api';
 import { v, ConvexError } from 'convex/values';
 import { makeAppleClient, COUNTRIES } from '../src/apple/clients.js';
-import { makeRetry } from '../src/apple/net.js';
+import { makeRetry, makeThrottle } from '../src/apple/net.js';
+import { checkCandidates, words } from '../src/metrics/appwords.js';
 import { summarizeReviews } from '../src/metrics/reviews.js';
 import { allowedEmail } from './access';
 
@@ -81,5 +82,42 @@ export const nicheReviews = action({
     for (const a of apps) all.push(...(await client.reviews(a.id, c, 1).catch(() => [])).map((r) => ({ ...r, app: a.name })));
     const names = new Set(apps.flatMap((a) => a.name.toLowerCase().split(/[^\p{L}\p{N}']+/u)).filter(Boolean));
     return { ...summarizeReviews(all, 12, names), apps: apps.map((a) => ({ id: a.id, name: a.name, icon: a.icon })) };
+  },
+});
+
+// "Verifica acum" pe pagina unui app, pasul 1: ce cuvinte verificam (vezi checkCandidates).
+// Sugestiile App Store le cerem pentru primele cuvinte din nume si pentru inceputul numelui.
+const CHECK_MAX = 40;
+const CHECK_HINT_SEEDS = 3;
+export const checkPlan = action({
+  args: { country: v.string(), name: v.string(), subtitle: v.optional(v.string()), known: v.array(v.string()) },
+  handler: async (ctx, { country: cc, name, subtitle, known }) => {
+    await guard(ctx);
+    const client = apple();
+    const nameWords = words(name).filter((w) => w.length > 2);
+    const seeds = [...new Set([nameWords.slice(0, 2).join(' '), ...nameWords.slice(0, CHECK_HINT_SEEDS)])].filter(Boolean);
+    const hints = [];
+    for (const s of seeds) hints.push(...await client.suggest(s, country(cc)).catch(() => []));
+    return checkCandidates({ name, subtitle, known: known.slice(0, CHECK_MAX), hints, max: CHECK_MAX });
+  },
+});
+
+// Pasul 2: locul real in cautare (top 200), cate o bucata mica de cuvinte pe apel (site-ul arata progresul).
+// Acelasi ritm sigur ca robotul (~19 cautari/min), ca Apple sa nu raspunda 403.
+const CHECK_BATCH = 6;
+export const checkRanks = action({
+  args: { id: v.number(), country: v.string(), terms: v.array(v.string()) },
+  handler: async (ctx, { id, country: cc, terms }) => {
+    await guard(ctx);
+    const client = makeAppleClient({ searchThrottle: makeThrottle(3200), retry: makeRetry({ retries: 2, baseDelayMs: 10_000 }) });
+    const out = [];
+    for (const term of terms.slice(0, CHECK_BATCH)) {
+      try {
+        out.push({ term, ...await client.searchRank(term, country(cc), id) });
+      } catch (err) {
+        out.push({ term, position: null, total: 0, error: err.message });
+      }
+    }
+    return out;
   },
 });

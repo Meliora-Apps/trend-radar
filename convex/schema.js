@@ -42,4 +42,11 @@ export default defineSchema({
     prepId: v.optional(v.id('_storage')),
     parts: v.array(v.object({ phase: v.string(), storageId: v.id('_storage') })),
   }).index('by_date_country', ['date', 'country']),
+  // Ultima verificare "Verifica acum" a unui app intr-o tara: locul real in cautare (top 200) la fiecare cuvant.
+  appChecks: defineTable({
+    appId: v.number(),
+    country: v.string(),
+    at: v.number(),
+    results: v.array(v.object({ term: v.string(), position: v.union(v.number(), v.null()), total: v.number() })),
+  }).index('by_app_country', ['appId', 'country']),
 });

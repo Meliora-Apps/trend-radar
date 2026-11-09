@@ -197,6 +197,16 @@ export function makeAppleClient({
         + `&country=${country.toLowerCase()}&media=software&entity=software&limit=10&lang=en_us${fresh()}`;
       return call(search, 'search', url, {}, async (r) => parseSearch(await r.json()));
     },
+    // Locul unui app la un cuvant, in primele 200 de rezultate ale cautarii (null = nu e in primele 200).
+    searchRank(term, country, id) {
+      const url = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}`
+        + `&country=${country.toLowerCase()}&media=software&entity=software&limit=200&lang=en_us${fresh()}`;
+      return call(search, 'search', url, {}, async (r) => {
+        const ids = ((await r.json()).results ?? []).map((x) => x.trackId);
+        const i = ids.indexOf(Number(id));
+        return { position: i >= 0 ? i + 1 : null, total: ids.length };
+      });
+    },
     upcoming(term, country, after) {
       const url = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}`
         + `&country=${country.toLowerCase()}&media=software&entity=software&limit=200&lang=en_us${fresh()}`;

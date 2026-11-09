@@ -38,6 +38,7 @@ const withAuth = (call) => async (name, args) => {
 const convex = {
   query: withAuth((n, a) => client.query(n, a)),
   action: withAuth((n, a) => client.action(n, a)),
+  mutation: withAuth((n, a) => client.mutation(n, a)),
 };
 
 async function signIn() {

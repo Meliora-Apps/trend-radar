@@ -145,6 +145,21 @@ export function makeRemoteApi(convex) {
       const keywords = p.keywords.map((k) => ({ ...k, source: d && k.country === live.country ? keywordSource(k.term, d.name, d.subtitle) : null }));
       return { country: live.country, detail: d, keywords, ranks: p.ranks, similar: live.similar, estimates: p.estimates, changes: p.changes };
     },
+    // "Verifica acum": ce cuvinte verificam, locul real (cate o bucata), ultima verificare salvata.
+    '/api/check-plan': (q) => convex.action('apple:checkPlan', {
+      country: q.get('country') ?? 'US', name: q.get('name') ?? '', subtitle: q.get('subtitle') ?? '',
+      known: JSON.parse(q.get('known') ?? '[]'),
+    }),
+    '/api/check-ranks': async (q) => (await convex.action('apple:checkRanks', {
+      id: Number(q.get('id')), country: q.get('country') ?? 'US', terms: JSON.parse(q.get('terms') ?? '[]'),
+    })).map((r) => ({ ...r, source: keywordSource(r.term, q.get('name') ?? '', q.get('subtitle') ?? '') })),
+    '/api/check-last': async (q) => {
+      const r = await convex.query('appChecks:last', { appId: Number(q.get('id')), country: q.get('country') ?? 'US' });
+      return r && { ...r, results: r.results.map((x) => ({ ...x, source: keywordSource(x.term, q.get('name') ?? '', q.get('subtitle') ?? '') })) };
+    },
+    '/api/check-save': (q) => convex.mutation('appChecks:save', {
+      appId: Number(q.get('id')), country: q.get('country') ?? 'US', results: JSON.parse(q.get('results') ?? '[]'),
+    }),
     '/api/reviews': (q) => convex.action('apple:reviews', { id: Number(q.get('id')), country: q.get('country') ?? 'US' }),
     '/api/niche-reviews': async (q) => {
       const t = (q.get('term') ?? '').trim().toLowerCase();
