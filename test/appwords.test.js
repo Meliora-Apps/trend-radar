@@ -76,3 +76,13 @@ test('hintsFor: doar sugestiile care incep cu perechea ca si cuvinte intregi', a
   assert.deepEqual(hintsFor('learn uk', ['learn ukulele', 'learn uk', 'Learn UK driving', 'learn ukrainian free']), ['learn uk', 'Learn UK driving']);
   assert.deepEqual(hintsFor('uk driving', ['uk driving test', 'uk drivingschool']), ['uk driving test']);
 });
+
+test('parseAppQuery: link App Store, id sau nume', async () => {
+  const { parseAppQuery } = await import('../src/metrics/appwords.js');
+  assert.deepEqual(parseAppQuery('https://apps.apple.com/gb/app/learn-uk-driving-theory-test/id1587595938?pt=1'), { id: 1587595938, country: 'GB' });
+  assert.deepEqual(parseAppQuery('id1587595938'), { id: 1587595938, country: null });
+  assert.deepEqual(parseAppQuery(' 1587595938 '), { id: 1587595938, country: null });
+  assert.deepEqual(parseAppQuery('  Driving Theory  '), { term: 'driving theory' });
+  assert.deepEqual(parseAppQuery('Calculator 2'), { term: 'calculator 2' });
+  assert.equal(parseAppQuery('  '), null);
+});

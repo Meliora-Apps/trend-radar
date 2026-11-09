@@ -173,3 +173,16 @@ td.term .meta { margin-top: 3px; }
 .est-row div b { font-size: 15px; }
 tr.dim td { opacity: .55; }
 td.terms .chip { display: inline-block; margin: 2px 0; cursor: pointer; font-weight: 500; }
+
+/* Verifica acum: incarcare */
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--surface-2); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 8px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.check-progress { margin: 6px 0 14px; }
+.check-progress .bar { height: 8px; border-radius: 4px; background: var(--surface-2); overflow: hidden; margin-top: 8px; }
+.check-progress .bar i { display: block; height: 100%; background: var(--accent); border-radius: 4px; transition: width .9s linear; }
+.check-progress .now { margin-top: 6px; }
+button:disabled { opacity: .55; cursor: default; }
+/* Cauta aplicatie */
+.find-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+.find-row input { flex: 1 1 260px; }
+ul.apps li .find-actions { margin-left: auto; display: flex; gap: 6px; align-items: center; }

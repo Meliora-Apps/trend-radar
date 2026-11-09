@@ -79,3 +79,14 @@ export function hintsFor(seed, hints) {
   const k = words(seed).join(' ');
   return hints.filter((h) => { const w = words(h).join(' '); return w === k || w.startsWith(`${k} `); });
 }
+
+// Ce a scris omul in "Cauta aplicatie": link App Store (cu tara din link), id (id123 sau doar cifre) sau nume.
+export function parseAppQuery(q) {
+  const t = (q ?? '').trim();
+  if (!t) return null;
+  const link = t.match(/apps\.apple\.com\/([a-z]{2})\/.*?id(\d{5,})/i);
+  if (link) return { id: Number(link[2]), country: link[1].toUpperCase() };
+  const id = t.match(/^(?:id)?(\d{6,})$/i);
+  if (id) return { id: Number(id[1]), country: null };
+  return { term: t.toLowerCase().replace(/\s+/g, ' ') };
+}

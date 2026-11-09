@@ -4,7 +4,7 @@ import { internal } from './_generated/api';
 import { v, ConvexError } from 'convex/values';
 import { makeAppleClient, COUNTRIES } from '../src/apple/clients.js';
 import { makeRetry, makeThrottle } from '../src/apple/net.js';
-import { checkCandidates, hintSeeds, hintsFor } from '../src/metrics/appwords.js';
+import { checkCandidates, hintSeeds, hintsFor, parseAppQuery } from '../src/metrics/appwords.js';
 import { summarizeReviews } from '../src/metrics/reviews.js';
 import { allowedEmail } from './access';
 
@@ -117,5 +117,19 @@ export const checkRanks = action({
       }
     }
     return out;
+  },
+});
+
+// "Cauta aplicatie": dupa link App Store / id (direct) sau dupa nume (primele 10 din cautarea App Store).
+export const findApps = action({
+  args: { query: v.string(), country: v.string() },
+  handler: async (ctx, { query: text, country: cc }) => {
+    await guard(ctx);
+    const q = parseAppQuery(text);
+    if (!q) return { country: country(cc), apps: [] };
+    const client = apple();
+    const c = country(q.country ?? cc);
+    const ids = q.id ? [q.id] : (await client.topApps(q.term, c)).map((a) => a.id);
+    return { country: c, apps: ids.length ? await lookupAll(client, ids, c) : [] };
   },
 });

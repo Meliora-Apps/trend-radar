@@ -145,6 +145,7 @@ export function makeRemoteApi(convex) {
       const keywords = p.keywords.map((k) => ({ ...k, source: d && k.country === live.country ? keywordSource(k.term, d.name, d.subtitle) : null }));
       return { country: live.country, detail: d, keywords, ranks: p.ranks, similar: live.similar, estimates: p.estimates, changes: p.changes };
     },
+    '/api/find-apps': (q) => convex.action('apple:findApps', { query: q.get('q') ?? '', country: q.get('country') ?? 'US' }),
     // "Verifica acum": ce cuvinte verificam, locul real (cate o bucata), ultima verificare salvata.
     '/api/check-plan': (q) => convex.action('apple:checkPlan', {
       country: q.get('country') ?? 'US', name: q.get('name') ?? '', subtitle: q.get('subtitle') ?? '',

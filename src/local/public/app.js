@@ -82,9 +82,10 @@ const VIEWS = {
   themes: { title: 'Teme topuri', periods: null },
   upcoming: { title: 'Lansări viitoare', periods: null },
   search: { title: 'Caută kw', periods: null },
+  findapp: { title: 'Caută aplicație', periods: null },
   app: { title: 'Aplicație', periods: null },
 };
-const state = { view: 'new', country: 'US', category: 'all', period: 7, origin: 'appeared', chartType: 'all', source: 'charts', who: 'money', status: 'preorder', allNiches: false, text: '', sort: null, rows: [], term: '', appId: null, appCountry: 'US', appKwAll: false };
+const state = { view: 'new', country: 'US', category: 'all', period: 7, origin: 'appeared', chartType: 'all', source: 'charts', who: 'money', status: 'preorder', allNiches: false, text: '', sort: null, rows: [], term: '', appId: null, appCountry: 'US', appKwAll: false, appQuery: '', autoCheck: false };
 
 const COLS = {
   country: { label: 'Țara' },
@@ -272,7 +273,7 @@ async function loadMeta() {
 function setupFilters() {
   const v = VIEWS[state.view];
   const isTable = !!VIEW_COLS[state.view];
-  $('#filters').style.display = ['search', 'app'].includes(state.view) ? 'none' : '';
+  $('#filters').style.display = ['search', 'app', 'findapp'].includes(state.view) ? 'none' : '';
   $('#f-period-wrap').style.display = v.periods ? '' : 'none';
   $('#f-origin-wrap').style.display = state.view === 'new' ? '' : 'none';
   $('#f-type-wrap').style.display = state.view === 'apps' && state.source !== 'feed' ? '' : 'none';
@@ -433,6 +434,7 @@ async function renderView(scrollY = 0) {
   syncControls();
   $('#notice').innerHTML = '';
   if (state.view === 'search') { renderSearch(); return window.scrollTo(0, 0); }
+  if (state.view === 'findapp') { renderFindApp(); return window.scrollTo(0, 0); }
   if (state.view === 'app') { await renderApp(); return window.scrollTo(0, scrollY); }
   if (state.view === 'themes') { await renderThemes(); return window.scrollTo(0, scrollY); }
   const params = new URLSearchParams({ name: state.view, country: state.country, category: state.category, period: state.period, origin: state.origin, type: state.chartType, source: state.source, who: state.who, status: state.status, all: state.allNiches ? '1' : '0' });
@@ -459,7 +461,7 @@ history.scrollRestoration = 'manual';
 const snapshot = () => ({
   view: state.view, country: state.country, category: state.category, period: state.period,
   origin: state.origin, chartType: state.chartType, source: state.source, who: state.who, status: state.status, term: state.term, text: state.text, sort: state.sort, from: state.from ?? null,
-  appId: state.appId, appCountry: state.appCountry, appKwAll: state.appKwAll,
+  appId: state.appId, appCountry: state.appCountry, appKwAll: state.appKwAll, appQuery: state.appQuery,
 });
 // Pagina noua: memoram unde eram (inclusiv scroll-ul) in intrarea curenta, apoi adaugam una noua.
 function navigate(changes) {
@@ -595,6 +597,54 @@ async function showTerm(term) {
   }
 }
 
+// ---------- Cauta aplicatie ----------
+// Dupa nume, link App Store sau id; "Verifica kw" deschide pagina aplicatiei si porneste singura verificarea.
+function renderFindApp() {
+  const cc = state.appCountry || 'US';
+  $('#content').innerHTML = `
+    <div class="card panel">
+      <h3>Caută o aplicație ${q('Scrie numele aplicației sau lipește linkul ei din App Store (sau id-ul, ex. id1587595938). Apoi „Verifică kw” arată la ce cuvinte apare în căutare și pe ce loc (top 200), în țara aleasă.')}</h3>
+      <div class="find-row">
+        <input id="find-q" type="search" placeholder="Nume, link App Store sau id" autocomplete="off" value="${esc(state.appQuery)}">
+        <span>${['US', 'GB', 'DE', 'FR', 'IT', 'ES'].map((c) => `<button type="button" class="chip ${c === cc ? 'on' : ''}" data-find-cc="${c}">${c}</button>`).join('')}</span>
+        <button type="button" class="btn" id="find-go">Caută</button>
+      </div>
+      <ul class="apps" id="find-result"></ul>
+    </div>`;
+  const input = $('#find-q');
+  const go = () => findApps(input.value).catch((err) => { $('#find-result').innerHTML = `<li class="muted">Nu am putut căuta: ${esc(err.message)}</li>`; });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+  $('#find-go').addEventListener('click', go);
+  document.querySelectorAll('[data-find-cc]').forEach((b) => b.addEventListener('click', () => {
+    state.appCountry = b.dataset.findCc; remember();
+    document.querySelectorAll('[data-find-cc]').forEach((x) => x.classList.toggle('on', x === b));
+    if (input.value.trim()) go();
+  }));
+  if (state.appQuery) go(); else input.focus();
+}
+
+async function findApps(text) {
+  const out = $('#find-result');
+  if (!text.trim()) return;
+  state.appQuery = text.trim(); remember();
+  out.innerHTML = '<li class="muted"><span class="spinner"></span>Caut în App Store…</li>';
+  const r = await api(`/api/find-apps?q=${encodeURIComponent(text)}&country=${state.appCountry || 'US'}`);
+  if (state.view !== 'findapp') return;
+  if (r.country !== state.appCountry) {
+    state.appCountry = r.country; remember();
+    document.querySelectorAll('[data-find-cc]').forEach((x) => x.classList.toggle('on', x.dataset.findCc === r.country));
+  }
+  out.innerHTML = r.apps.length ? r.apps.map((a, i) => `<li><span class="muted">${i + 1}</span><img src="${esc(a.icon)}" alt="" loading="lazy">
+      <div><a data-app="${a.id}" data-app-country="${r.country}" class="applink">${esc(a.name)}</a>
+        <div class="meta">${esc(a.seller)} · ${a.ratings.toLocaleString('ro-RO')} rating-uri${a.rating ? ` · ${a.rating.toFixed(1)}★` : ''}</div></div>
+      <span class="find-actions"><button type="button" class="btn" data-check-app="${a.id}">Verifică kw</button>
+        <a class="muted ext" href="${esc(a.url)}" target="_blank" rel="noopener" title="Deschide în App Store">↗</a></span></li>`).join('')
+    : `<li class="muted">Nicio aplicație găsită în ${esc(r.country)}. Încearcă alt nume sau altă țară.</li>`;
+  out.querySelectorAll('[data-check-app]').forEach((b) => b.addEventListener('click', () => {
+    navigate({ view: 'app', appId: Number(b.dataset.checkApp), appCountry: r.country, appKwAll: false, from: 'findapp', autoCheck: true });
+  }));
+}
+
 // ---------- Pagina aplicatiei ----------
 const SOURCE = {
   title: ['titlu', 'Toate cuvintele sunt în titlu.'],
@@ -721,29 +771,72 @@ async function liveCheck(app) {
   const when = last ? `<span class="muted small">verificat ${new Date(last.at).toLocaleString('ro-RO', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>` : '';
   box.innerHTML = head(`<span>${when} <button type="button" class="btn" id="check-go">${last ? 'Verifică din nou' : 'Verifică acum'}</button></span>`)
     + (last ? checkTable(last.results, null) : `<div class="empty">Apasă „Verifică acum” ca să vezi locul real al aplicației în căutare (top 200) la cuvintele ei probabile, în ${esc(app.country)}.</div>`);
-  $('#check-go').addEventListener('click', () => runCheck(app, last).catch((err) => {
+  const start = () => runCheck(app, last).catch((err) => {
     checkRun.key = null;
     if ($('#live-check')) $('#live-check').innerHTML = head('') + `<div class="empty">Verificarea s-a oprit: ${esc(err.message)}</div>`;
-  }));
+  });
+  $('#check-go').addEventListener('click', start);
+  if (state.autoCheck) {
+    state.autoCheck = false;
+    box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    start();
+  }
 }
 
+const CHECK_STEP = 3; // cuvinte pe apel: progres vizibil la ~10 s
+const SEC_PER_TERM = 3.4;
 async function runCheck(app, last) {
   const key = `${app.id}:${app.country}`;
   checkRun.key = key;
-  const draw = (html) => { if (checkRun.key === key && $('#live-check') && state.appId === app.id && state.appCountry === app.country) $('#live-check').innerHTML = html; };
-  const head = `<div class="panel-head"><h3>Unde se indexează acum ${q(CHECK_HELP)}</h3></div>`;
-  draw(`${head}<div class="empty">Aleg cuvintele de verificat…</div>`);
+  const visible = () => $('#live-check') && state.view === 'app' && state.appId === app.id && state.appCountry === app.country;
+  const mine = () => checkRun.key === key && visible();
+  const title = `<h3>Unde se indexează acum ${q(CHECK_HELP)}</h3>`;
+  const busy = `<button type="button" class="btn" disabled><span class="spinner"></span>Se caută…</button>`;
+  const prog = { done: 0, total: 0, now: [], started: Date.now(), results: [] };
+  // Bara inainteaza si intre raspunsuri (estimat din ritmul Apple), fara sa treaca de bucata in curs.
+  const pctNow = () => {
+    const est = Math.min(prog.done + prog.now.length - 0.2, prog.done + ((Date.now() - prog.stepAt) / 1000) / SEC_PER_TERM);
+    return Math.round((Math.max(prog.done, est) / prog.total) * 100);
+  };
+  const draw = () => {
+    if (!mine()) return;
+    const box = $('#live-check');
+    if (!prog.total) {
+      box.innerHTML = `<div class="panel-head">${title}${busy}</div>
+        <div class="check-progress"><span class="spinner"></span>Aleg cuvintele de verificat: titlu, subtitlu și sugestiile App Store…</div>`;
+      return;
+    }
+    const left = Math.max(0, Math.round((prog.total - prog.done) * SEC_PER_TERM));
+    const pct = pctNow();
+    const html = `<div class="check-progress"><b>Caut în App Store: ${prog.done} din ${prog.total} cuvinte</b>
+        <span class="muted"> · mai durează ~${left < 60 ? `${left} s` : `${Math.ceil(left / 60)} min`}</span>
+        <div class="bar"><i style="width:${pct}%"></i></div>
+        <div class="now muted small"><span class="spinner"></span>acum: ${prog.now.map((t) => `„${esc(t)}”`).join(', ')}</div></div>
+      ${prog.results.length ? checkTable(prog.results, last?.results) : ''}`;
+    box.innerHTML = `<div class="panel-head">${title}${busy}</div>${html}`;
+  };
+  draw();
   const terms = await api(`/api/check-plan?${qs({ country: app.country, name: app.name, subtitle: app.subtitle, known: app.known })}`);
-  const results = [];
-  for (let i = 0; i < terms.length; i += 6) {
-    const pct = Math.round((i / terms.length) * 100);
-    draw(`${head}<p>Caut în App Store: <b>${i}</b> din ${terms.length} cuvinte… <span class="scorebar"><i style="width:${pct}%"></i></span></p>${results.length ? checkTable(results, last?.results) : ''}`);
-    results.push(...await api(`/api/check-ranks?${qs({ id: app.id, country: app.country, name: app.name, subtitle: app.subtitle, terms: terms.slice(i, i + 6) })}`));
+  prog.total = terms.length;
+  const timer = setInterval(() => { const bar = mine() && $('#live-check .check-progress .bar i'); if (bar) bar.style.width = `${pctNow()}%`; }, 1000);
+  try {
+    for (let i = 0; i < terms.length; i += CHECK_STEP) {
+      prog.now = terms.slice(i, i + CHECK_STEP);
+      prog.stepAt = Date.now();
+      draw();
+      prog.results.push(...await api(`/api/check-ranks?${qs({ id: app.id, country: app.country, name: app.name, subtitle: app.subtitle, terms: prog.now })}`));
+      prog.done = prog.results.length;
+    }
+  } finally {
+    clearInterval(timer);
   }
+  const results = prog.results;
   const ok = results.filter((x) => !x.error);
   if (ok.length) await api(`/api/check-save?${qs({ id: app.id, country: app.country, results: ok.map(({ term, position, total }) => ({ term, position, total })) })}`).catch(() => {});
   checkRun.key = null;
-  draw(`<div class="panel-head"><h3>Unde se indexează acum ${q(CHECK_HELP)}</h3><span><span class="muted small">verificat acum</span> <button type="button" class="btn" id="check-go">Verifică din nou</button></span></div>${checkTable(results, last?.results)}`);
+  if (!visible()) return;
+  const errs = results.length - ok.length;
+  $('#live-check').innerHTML = `<div class="panel-head">${title}<span><span class="muted small">verificat acum${errs ? ` · ${errs} cuvinte cu eroare (Apple a limitat; reîncearcă peste un minut)` : ''}</span> <button type="button" class="btn" id="check-go">Verifică din nou</button></span></div>${checkTable(results, last?.results)}`;
   $('#check-go')?.addEventListener('click', () => runCheck(app, { results: ok }).catch(() => { checkRun.key = null; }));
 }
 
