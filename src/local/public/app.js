@@ -761,6 +761,15 @@ function checkTable(results, prev) {
       <td>${x.source ? `<span class="badge src-${x.source}" data-tip="${esc(SOURCE[x.source][1])}">${SOURCE[x.source][0]}</span>` : ''}</td></tr>`).join('')}</tbody></table>`;
 }
 
+function checkFailed(app, err) {
+  checkRun.key = null;
+  const box = $('#live-check');
+  if (!box || state.view !== 'app' || state.appId !== app.id || state.appCountry !== app.country) return;
+  box.innerHTML = `<div class="panel-head"><h3>Unde se indexează acum ${q(CHECK_HELP)}</h3><button type="button" class="btn" id="check-go">Încearcă din nou</button></div>
+    <div class="empty">Verificarea s-a oprit: ${esc(err.message)}. Dacă pagina a stat mult deschisă, reîncarc-o (Cmd+R).</div>`;
+  $('#check-go').addEventListener('click', () => runCheck(app, null).catch((e) => checkFailed(app, e)));
+}
+
 async function liveCheck(app) {
   const box = $('#live-check');
   if (!box) return;
@@ -771,10 +780,7 @@ async function liveCheck(app) {
   const when = last ? `<span class="muted small">verificat ${new Date(last.at).toLocaleString('ro-RO', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>` : '';
   box.innerHTML = head(`<span>${when} <button type="button" class="btn" id="check-go">${last ? 'Verifică din nou' : 'Verifică acum'}</button></span>`)
     + (last ? checkTable(last.results, null) : `<div class="empty">Apasă „Verifică acum” ca să vezi locul real al aplicației în căutare (top 200) la cuvintele ei probabile, în ${esc(app.country)}.</div>`);
-  const start = () => runCheck(app, last).catch((err) => {
-    checkRun.key = null;
-    if ($('#live-check')) $('#live-check').innerHTML = head('') + `<div class="empty">Verificarea s-a oprit: ${esc(err.message)}</div>`;
-  });
+  const start = () => runCheck(app, last).catch((err) => checkFailed(app, err));
   $('#check-go').addEventListener('click', start);
   if (state.autoCheck) {
     state.autoCheck = false;
@@ -785,6 +791,11 @@ async function liveCheck(app) {
 
 const CHECK_STEP = 3; // cuvinte pe apel: progres vizibil la ~10 s
 const SEC_PER_TERM = 3.4;
+const CHECK_TIMEOUT_MS = globalThis.TR_CHECK_TIMEOUT_MS ?? 60000; // un apel normal dureaza ~11 s; peste 1 min = conexiune blocata (ex. dupa sleep)
+const timed = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error('serverul nu a răspuns la timp')), ms))]);
+async function checkStep(path) {
+  try { return await timed(api(path), CHECK_TIMEOUT_MS); } catch { return timed(api(path), CHECK_TIMEOUT_MS); }
+}
 async function runCheck(app, last) {
   const key = `${app.id}:${app.country}`;
   checkRun.key = key;
@@ -816,7 +827,7 @@ async function runCheck(app, last) {
     box.innerHTML = `<div class="panel-head">${title}${busy}</div>${html}`;
   };
   draw();
-  const terms = await api(`/api/check-plan?${qs({ country: app.country, name: app.name, subtitle: app.subtitle, known: app.known })}`);
+  const terms = await checkStep(`/api/check-plan?${qs({ country: app.country, name: app.name, subtitle: app.subtitle, known: app.known })}`);
   prog.total = terms.length;
   const timer = setInterval(() => { const bar = mine() && $('#live-check .check-progress .bar i'); if (bar) bar.style.width = `${pctNow()}%`; }, 1000);
   try {
@@ -824,7 +835,9 @@ async function runCheck(app, last) {
       prog.now = terms.slice(i, i + CHECK_STEP);
       prog.stepAt = Date.now();
       draw();
-      prog.results.push(...await api(`/api/check-ranks?${qs({ id: app.id, country: app.country, name: app.name, subtitle: app.subtitle, terms: prog.now })}`));
+      const step = prog.now;
+      prog.results.push(...await checkStep(`/api/check-ranks?${qs({ id: app.id, country: app.country, name: app.name, subtitle: app.subtitle, terms: step })}`)
+        .catch((err) => step.map((term) => ({ term, position: null, total: 0, error: err.message }))));
       prog.done = prog.results.length;
     }
   } finally {
@@ -836,8 +849,8 @@ async function runCheck(app, last) {
   checkRun.key = null;
   if (!visible()) return;
   const errs = results.length - ok.length;
-  $('#live-check').innerHTML = `<div class="panel-head">${title}<span><span class="muted small">verificat acum${errs ? ` · ${errs} cuvinte cu eroare (Apple a limitat; reîncearcă peste un minut)` : ''}</span> <button type="button" class="btn" id="check-go">Verifică din nou</button></span></div>${checkTable(results, last?.results)}`;
-  $('#check-go')?.addEventListener('click', () => runCheck(app, { results: ok }).catch(() => { checkRun.key = null; }));
+  $('#live-check').innerHTML = `<div class="panel-head">${title}<span><span class="muted small">verificat acum${errs ? ` · ${errs} cuvinte cu eroare (${results.some((x) => /timp/.test(x.error ?? '')) ? 'serverul n-a răspuns' : 'Apple a limitat'}; reîncearcă peste un minut)` : ''}</span> <button type="button" class="btn" id="check-go">Verifică din nou</button></span></div>${checkTable(results, last?.results)}`;
+  $('#check-go')?.addEventListener('click', () => runCheck(app, { results: ok }).catch((err) => checkFailed(app, err)));
 }
 
 const EVO = [['downloads', 'Loc în topuri'], ['grossing', 'Topul încasărilor'], ['ratings', 'Rating-uri']];
