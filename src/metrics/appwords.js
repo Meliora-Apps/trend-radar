@@ -72,3 +72,10 @@ export function hintSeeds(name, max = 3) {
   const pairs = all.filter((p) => p.split(' ').length === 2);
   return (pairs.length ? pairs : all.filter((p) => !p.includes(' '))).slice(0, max);
 }
+
+// Sugestiile App Store merg pe inceput de text ("learn uk" -> "learn ukulele"): pastram doar ce incepe cu
+// perechea ca si cuvinte intregi.
+export function hintsFor(seed, hints) {
+  const k = words(seed).join(' ');
+  return hints.filter((h) => { const w = words(h).join(' '); return w === k || w.startsWith(`${k} `); });
+}

@@ -70,3 +70,9 @@ test('hintSeeds: perechi de cuvinte din nume (precise), un singur cuvant doar da
   assert.deepEqual(hintSeeds('Calm: Sleep & Meditation'), ['calm', 'sleep', 'meditation']);
   assert.deepEqual(hintSeeds('Duolingo'), ['duolingo']);
 });
+
+test('hintsFor: doar sugestiile care incep cu perechea ca si cuvinte intregi', async () => {
+  const { hintsFor } = await import('../src/metrics/appwords.js');
+  assert.deepEqual(hintsFor('learn uk', ['learn ukulele', 'learn uk', 'Learn UK driving', 'learn ukrainian free']), ['learn uk', 'Learn UK driving']);
+  assert.deepEqual(hintsFor('uk driving', ['uk driving test', 'uk drivingschool']), ['uk driving test']);
+});

@@ -4,7 +4,7 @@ import { internal } from './_generated/api';
 import { v, ConvexError } from 'convex/values';
 import { makeAppleClient, COUNTRIES } from '../src/apple/clients.js';
 import { makeRetry, makeThrottle } from '../src/apple/net.js';
-import { checkCandidates, hintSeeds } from '../src/metrics/appwords.js';
+import { checkCandidates, hintSeeds, hintsFor } from '../src/metrics/appwords.js';
 import { summarizeReviews } from '../src/metrics/reviews.js';
 import { allowedEmail } from './access';
 
@@ -95,7 +95,7 @@ export const checkPlan = action({
     await guard(ctx);
     const client = apple();
     const hints = [];
-    for (const s of hintSeeds(name, CHECK_HINT_SEEDS)) hints.push(...await client.suggest(s, country(cc)).catch(() => []));
+    for (const s of hintSeeds(name, CHECK_HINT_SEEDS)) hints.push(...hintsFor(s, await client.suggest(s, country(cc)).catch(() => [])));
     return checkCandidates({ name, subtitle, known: known.slice(0, CHECK_MAX), hints, max: CHECK_MAX });
   },
 });
