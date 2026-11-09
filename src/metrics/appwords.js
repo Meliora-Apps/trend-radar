@@ -64,3 +64,11 @@ export function checkCandidates({ name, subtitle, known = [], hints = [], max = 
   hints.forEach(add);
   return out.slice(0, max);
 }
+
+// Pentru ce cerem sugestii App Store la "Verifica acum": perechile de cuvinte din nume (un cuvant generic
+// singur, ca "learn", aduce zgomot: "learn spanish"). Daca numele nu are perechi, cuvintele lui.
+export function hintSeeds(name, max = 3) {
+  const all = phrases(name);
+  const pairs = all.filter((p) => p.split(' ').length === 2);
+  return (pairs.length ? pairs : all.filter((p) => !p.includes(' '))).slice(0, max);
+}

@@ -62,3 +62,11 @@ test('checkCandidates: expresiile nu trec peste semne de despartire (& : - , |)'
   assert.ok(!c.includes('calm sleep') && !d.includes('calm sleep'));
   assert.ok(d.includes('calm') && d.includes('sleep') && d.includes('meditation'));
 });
+
+test('hintSeeds: perechi de cuvinte din nume (precise), un singur cuvant doar daca numele are unul', async () => {
+  const { hintSeeds } = await import('../src/metrics/appwords.js');
+  assert.deepEqual(hintSeeds('Learn UK Driving Theory Test'), ['learn uk', 'uk driving', 'driving theory']);
+  assert.deepEqual(hintSeeds('Photo Editor for Instagram'), ['photo editor']);
+  assert.deepEqual(hintSeeds('Calm: Sleep & Meditation'), ['calm', 'sleep', 'meditation']);
+  assert.deepEqual(hintSeeds('Duolingo'), ['duolingo']);
+});

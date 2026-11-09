@@ -4,7 +4,7 @@ import { internal } from './_generated/api';
 import { v, ConvexError } from 'convex/values';
 import { makeAppleClient, COUNTRIES } from '../src/apple/clients.js';
 import { makeRetry, makeThrottle } from '../src/apple/net.js';
-import { checkCandidates, words } from '../src/metrics/appwords.js';
+import { checkCandidates, hintSeeds } from '../src/metrics/appwords.js';
 import { summarizeReviews } from '../src/metrics/reviews.js';
 import { allowedEmail } from './access';
 
@@ -86,7 +86,7 @@ export const nicheReviews = action({
 });
 
 // "Verifica acum" pe pagina unui app, pasul 1: ce cuvinte verificam (vezi checkCandidates).
-// Sugestiile App Store le cerem pentru primele cuvinte din nume si pentru inceputul numelui.
+// Sugestiile App Store le cerem pentru perechile de cuvinte din nume (vezi hintSeeds).
 const CHECK_MAX = 40;
 const CHECK_HINT_SEEDS = 3;
 export const checkPlan = action({
@@ -94,10 +94,8 @@ export const checkPlan = action({
   handler: async (ctx, { country: cc, name, subtitle, known }) => {
     await guard(ctx);
     const client = apple();
-    const nameWords = words(name).filter((w) => w.length > 2);
-    const seeds = [...new Set([nameWords.slice(0, 2).join(' '), ...nameWords.slice(0, CHECK_HINT_SEEDS)])].filter(Boolean);
     const hints = [];
-    for (const s of seeds) hints.push(...await client.suggest(s, country(cc)).catch(() => []));
+    for (const s of hintSeeds(name, CHECK_HINT_SEEDS)) hints.push(...await client.suggest(s, country(cc)).catch(() => []));
     return checkCandidates({ name, subtitle, known: known.slice(0, CHECK_MAX), hints, max: CHECK_MAX });
   },
 });
