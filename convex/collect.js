@@ -20,6 +20,8 @@ const MAX_ATTEMPTS = 4;
 const START_GRACE_MS = 2 * 60_000;
 // Faza in care trebuie pregatita o lista (vezi preparePhase) si ce bucati ii trebuie (din aceeasi banda).
 const PREP_NEEDS = { expand: [], lookup: ['charts', 'feed'], upcoming: [], classify: ['base', 'expand'] };
+// Doar clasificarea foloseste plan.terms (coada de clasificare): ceilalti pasi nu-l descarca.
+const NEEDS_TERMS = new Set(['classify']);
 // Ritmul cererilor catre Apple, comun tuturor benzilor dintr-o bucata (ies prin aceeasi adresa IP, iar Apple
 // limiteaza pe adresa): [cel mai des, cel mai rar] in ms intre doua cereri ale serviciului. Vechiul ritm era
 // pe tara (o cerere hints/RSS la 1,2 s si una search/lookup la 4 s in fiecare tara, adica ~5 si ~1,5 pe secunda
@@ -80,12 +82,13 @@ export const claim = internalMutation({
       return null;
     }
     await ctx.db.patch(run._id, { lease: now + LEASE_MS, ticks: run.ticks + 1 });
+    // Planul tarii (process.js): [planul, cuvintele lui] sau, de la remote-calc / versiunea dinainte, un singur fisier.
     const plans = {};
     for (const cc of COUNTRIES) {
       const p = await ctx.db.query('state').withIndex('by_name', (q) => q.eq('name', `plan/${cc}`)).unique();
-      plans[cc] = p?.storageIds?.[0] ?? null;
+      plans[cc] = { planId: p?.storageIds?.[0] ?? null, termsId: p?.storageIds?.[1] ?? null };
     }
-    const jobs = (await jobsOf(ctx, date)).map((j) => ({ id: j._id, job: j.job, prepId: j.prepId ?? null, parts: j.parts, planId: plans[j.country] }));
+    const jobs = (await jobsOf(ctx, date)).map((j) => ({ id: j._id, job: j.job, prepId: j.prepId ?? null, parts: j.parts, ...plans[j.country] }));
     return { jobs, pace: run.pace ?? null, searchGate: run.searchGate ?? null };
   },
 });
@@ -111,7 +114,8 @@ async function runLane(ctx, j, { deadline, log, pacers, retry, gate }) {
     const needs = PREP_NEEDS[phase];
     let prep = null;
     if (needs && !job.prepared) {
-      const plan = j.planId ? await loadJson(ctx, j.planId) : null;
+      let plan = j.planId ? await loadJson(ctx, j.planId) : null;
+      if (plan && j.termsId && NEEDS_TERMS.has(phase)) plan = { ...plan, terms: await loadJson(ctx, j.termsId) };
       const got = {};
       for (const p of parts.filter((x) => needs.includes(x.phase))) (got[p.phase] ??= []).push(...await loadJson(ctx, p.storageId));
       prep = preparePhase(job, { plan, parts: got });

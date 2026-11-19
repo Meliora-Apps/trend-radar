@@ -6,6 +6,7 @@ import { chartMovers, themes } from '../metrics/themes.js';
 import { addDays, diffDays } from '../util/dates.js';
 import { competition, opportunity, chance, isFlooding, saturated, marketEstimate, notANiche, dominantBrand, navigational } from '../metrics/niche.js';
 import { BIG_RATINGS } from '../metrics/score.js';
+import { CHANGES_SPAN, changesSince, pickChanges, sinceOf } from '../export/changes.js';
 
 export const SERIES_DAYS = 45;
 
@@ -87,7 +88,8 @@ const COMPANION_PUB = 100_000;
 // Cache pe tara, invalidat la fiecare import (versiune).
 // Calculul pe tari (src/export/split.js): memoSink primeste fiecare bucata calculata (cheie fara versiune), iar
 // memoSource da bucatile deja calculate de alta parte; cu db = null vederile folosesc doar bucatile date.
-export function makeViews(db, { spill = false, memoSource = null, memoSink = null } = {}) {
+// memoUse vede fiecare folosire a unei bucati (si din cache): asa stie exportul ce bucati cere fiecare lista.
+export function makeViews(db, { spill = false, memoSource = null, memoSink = null, memoUse = null } = {}) {
   // Cererile SQL pregatite o singura data (fiecare cerere pregatita tine memorie in SQLite pana e stearsa de GC),
   // la prima folosire: fara baza, o cerere ajunsa pana aici inseamna o bucata care lipseste.
   const stmts = new Map();
@@ -127,6 +129,7 @@ export function makeViews(db, { spill = false, memoSource = null, memoSink = nul
     spillPut = db.prepare('INSERT OR REPLACE INTO temp.memo_spill VALUES (?,?)');
   }
   const memo = (key, fn) => {
+    memoUse?.(key);
     const k = `${key}:${version}`;
     if (memoCache.has(k)) return memoCache.get(k);
     const saved = spillGet?.get(k);
@@ -670,22 +673,30 @@ export function makeViews(db, { spill = false, memoSource = null, memoSink = nul
   }
 
   // Ce schimba aplicatiile: nume (test de cuvinte cheie), versiuni noi (cu noutatile la cei care fac bani), pret.
-  // who='money' = doar cele din topul incasarilor de azi.
+  // who='money' = doar cele din topul incasarilor de azi. O singura bucata pe tara (CHANGES_SPAN zile): perioadele
+  // mai scurte sunt filtre ale ei (pickChanges, la fel ca in browser). `since`: ziua de inceput a fiecarei perioade.
   function changesView({ country = 'US', category = 'all', period = 7, who = 'money', limit = MAX_ROWS }) {
     const ccs = country === 'ALL' ? COUNTRIES : [country];
     const p = Number(period) || 7;
+    const span = Math.max(p, CHANGES_SPAN);
     const out = [];
-    for (const cc of ccs) out.push(...memo(`changes:${cc}:${p}`, () => changesFor(cc, p)));
+    const since = {};
+    for (const cc of ccs) {
+      const part = memo(`changes:${cc}:${span}`, () => changesFor(cc, span));
+      since[cc] = changesSince(part.dates);
+      out.push(...(p === span ? part.rows : pickChanges(part.rows, { [cc]: { [p]: sinceOf(part.dates, p) } }, p)));
+    }
     const rows = out.filter(byCategory(category)).filter((r) => who !== 'money' || r.grossRank != null)
       .sort((a, b) => b.date.localeCompare(a.date) || (a.grossRank ?? 999) - (b.grossRank ?? 999)
         || COUNTRIES.indexOf(a.country) - COUNTRIES.indexOf(b.country) || a.id - b.id || a.field.localeCompare(b.field));
-    return { total: rows.length, rows: rows.slice(0, limit) };
+    return { total: rows.length, rows: rows.slice(0, limit), since };
   }
 
+  // Schimbarile tarii din ultimele p zile cu cifre ({ dates: zilele acelea + cea dinainte, rows }).
   function changesFor(cc, p) {
     const out = [];
     const dates = q('SELECT DISTINCT date FROM app_stats WHERE country=? ORDER BY date DESC LIMIT ?').all(cc, p + 1).map((r) => r.date).reverse();
-    if (dates.length < 2) return out;
+    if (dates.length < 2) return { dates, rows: out };
     const since = dates[1];
     const meta = metaOf(cc);
     const { dl, gross } = todayRanks(cc);
@@ -705,7 +716,7 @@ export function makeViews(db, { spill = false, memoSource = null, memoSink = nul
     for (let i = 1; i < dates.length; i++) {
       for (const r of price.iterate(dates[i - 1], cc, dates[i])) push(r.id, dates[i], 'price', r.was, r.now);
     }
-    return out;
+    return { dates, rows: out };
   }
 
   // Pentru pagina aplicatiei: estimarea descarcarilor/banilor pe tari si istoricul schimbarilor.

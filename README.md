@@ -27,17 +27,23 @@ Totul rulează în **Convex** (producție), singur, în fiecare zi. Site-ul: htt
 - **Calculul zilei** (`convex/process.js`, pașii în `convex/calc.js`), pe pași mici, fiecare în limitele unei
   acțiuni Convex (10 minute, 512 MB de memorie, disc temporar mic); între pași totul stă în fișiere (Convex storage):
   1. câte un pas pe țară, toate în paralel: bucățile culese devin fișierele zilei (arhiva `raw`, aceleași fișiere
-     ca în `data/`); baza țării (SQLite, `src/local/db.js`, ~80 MB; copia ei e starea `db/<CC>`, iar prima dată
-     se face din arhivă) primește fișierele noi; apoi planul de mâine (`plan/<CC>`) și partea țării din export:
-     listele ei și bucățile pentru fișierele comune (tabela `pieces`, `src/export/split.js`);
+     ca în `data/`); baza țării (SQLite, `src/local/db.js`, ~100 MB; copia ei e starea `db/<CC>`, iar prima dată
+     se face din arhivă) primește fișierele noi; apoi planul de mâine (`plan/<CC>`: planul + lista cuvintelor, pe
+     care o citește doar clasificarea) și partea țării din export: listele ei și bucățile pentru fișierele comune
+     (tabela `pieces`, `src/export/split.js`);
   2. 22 de pași comuni, în paralel: `meta` + `terms`, listele ALL (5 grupe), `term/*` și `app/*` (câte 8 grupe);
-  3. publicarea: site-ul trece pe generația nouă doar dacă are toate fișierele (1099); cea veche și bucățile se șterg.
+  3. publicarea: site-ul trece pe generația nouă doar dacă are toate fișierele (1050); cea veche și bucățile se șterg.
+  Traficul Convex (fișierele citite și scrise de funcții se plătesc, ca și cele servite site-ului) e ținut mic: copia
+  bazei e compactă, fără indexuri și brotli (~12 MB în loc de ~30) și se rescrie o dată pe săptămână (între timp se
+  aduce la zi din arhivă: `src/export/dbcopy.js`); bucățile sunt brotli și fiecare pas comun le citește doar pe ale
+  lui; variantele de liste care sunt doar filtre ale altora (schimbările pe 7/14 zile, cuvintele „descoperite”) se
+  filtrează în browser (`src/export/changes.js`, `web/remote-api.js`).
   Un pas căzut se reia singur (de max. 3 ori, apoi tot calculul, de paznic); unul oprit forțat (memorie, timp) se
   reia când îi expiră rezervarea (~10 minute); unul care n-a pornit deloc (eroare a platformei: Convex nu reia singur
   o acțiune programată) se programează din nou după 2 minute. La fel o bucată de colectare care n-a pornit.
   Durata: ~1–2 minute (prima dată, cu bazele țărilor făcute din arhivă, câteva minute).
   Fișierele sunt aceleași, octet cu octet, ca exportul vechi dintr-o singură bază (`src/export/build.js`; testul
-  `test/split.test.js`).
+  `test/split.test.js`, care verifică și că filtrele din browser dau exact listele serverului local).
 - **Planul zilei următoare** (`src/compute/plan.js`): ce începuturi de cuvinte se extind și ce se clasifică.
 - **Calcule:** `src/metrics/` (funcții pure, testate).
 - **Site-ul**: Vercel, din `web/` (Vite) + interfața din `src/local/public/`; `web/remote-api.js` citește fișierele din Convex.

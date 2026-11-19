@@ -15,21 +15,28 @@ import { makeViews, pickScore, histPoints } from '../local/views.js';
 import { tx } from '../local/db.js';
 import { marketEstimate } from '../metrics/niche.js';
 import { shardOf, TERM_SHARDS, APP_SHARDS } from './shard.js';
+import { CHANGE_FILES } from './changes.js';
 
 export { shardOf, TERM_SHARDS, APP_SHARDS };
 
 const ALL = [...COUNTRIES, 'ALL'];
 
+// Cuvintele noi: "descoperite" sunt ~85% din toate, deci nu au fisier: browserul le filtreaza din `all` (dupa
+// `origin`, ca view()). "Aparute" (implicita interfetei, de ~7 ori mai mica) ramane fisier.
+export const NEW_ORIGINS = ['appeared', 'all'];
+
 // Variantele fiecarei liste (exact parametrii pe care ii trimite interfata), fara categorie si fara limita.
+// Unele variante sunt filtre ale altora, facute in browser (web/remote-api.js): NEW_ORIGINS, CHANGE_FILES.
 export function listVariants() {
   const out = [];
   for (const cc of ALL) {
-    for (const p of [1, 7, 30]) for (const origin of ['appeared', 'discovered', 'all']) out.push([`list/${cc}/new/${p}/${origin}`, (v) => v.view({ name: 'new', country: cc, period: p, origin, limit: Infinity })]);
+    for (const p of [1, 7, 30]) for (const origin of NEW_ORIGINS) out.push([`list/${cc}/new/${p}/${origin}`, (v) => v.view({ name: 'new', country: cc, period: p, origin, limit: Infinity })]);
     for (const name of ['rising', 'falling']) for (const p of [7, 30]) out.push([`list/${cc}/${name}/${p}`, (v) => v.view({ name, country: cc, period: p, limit: Infinity })]);
     for (const name of ['top', 'gone']) out.push([`list/${cc}/${name}`, (v) => v.view({ name, country: cc, limit: Infinity })]);
     for (const p of [7, 14, 30]) out.push([`list/${cc}/niches/${p}`, (v) => v.nicheView({ country: cc, period: p, all: true, limit: Infinity })]);
     out.push([`list/${cc}/breakouts`, (v) => v.breakoutView({ country: cc, limit: Infinity })]);
-    for (const p of [7, 14, 30]) for (const who of ['money', 'all']) out.push([`list/${cc}/changes/${p}/${who}`, (v) => v.changesView({ country: cc, period: p, who, limit: Infinity })]);
+    // Doar CHANGE_FILES; celelalte perioade si "doar cei care fac bani" sunt filtre ale listei pe 30 de zile.
+    for (const [p, who] of CHANGE_FILES) out.push([`list/${cc}/changes/${p}/${who}`, (v) => v.changesView({ country: cc, period: p, who, limit: Infinity })]);
     for (const launched of [30, 90, 180, 365]) {
       for (const type of ['all', 'free', 'paid', 'grossing']) out.push([`list/${cc}/apps/charts/${launched}/${type}`, (v) => v.newApps({ country: cc, type, launched, source: 'charts', limit: Infinity })]);
       out.push([`list/${cc}/apps/feed/${launched}`, (v) => v.newApps({ country: cc, launched, source: 'feed', limit: Infinity })]);

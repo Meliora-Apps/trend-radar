@@ -63,8 +63,8 @@ http.route({
   }),
 });
 
-// Calculul facut pe alt calculator (src/export/remote-calc.js): copiile bazelor tarilor (gzip, in bucati),
-// apoi fisierele exportului.
+// Calculul facut pe alt calculator (src/export/remote-calc.js): copiile bazelor tarilor (in bucati; `format`:
+// 'br' = copia compacta din src/export/dbcopy.js, altfel gzip), apoi fisierele exportului.
 http.route({
   path: '/ingest/db',
   method: 'GET',
@@ -76,7 +76,7 @@ http.route({
       if (!db) continue;
       const urls = [];
       for (const id of db.storageIds) urls.push(await ctx.storage.getUrl(id));
-      countries[cc] = { at: db.at, urls };
+      countries[cc] = { at: db.at, urls, format: db.value?.format ?? 'gzip', latest: db.value?.latest ?? null };
     }
     const cloud = await ctx.runQuery(internal.store.getState, { name: 'cloud' });
     return Response.json({ countries, cloud: cloud?.value ?? null });

@@ -3,14 +3,15 @@
 // incape de cateva ori in aceste limite, cea cu toate tarile nu mai incapea (vezi convex/process.js).
 //
 //  1. countryParts(db, cc): pe baza tarii -> listele tarii (fisiere finale) + bucatile ei pentru fisierele comune:
-//       memo/<CC>        bucatile listelor (aceleasi pe care lista ALL le refoloseste in exportFiles)
+//       memo/<CC>/<g>    bucatile listelor grupei g (LIST_GROUPS), aceleasi pe care lista ALL le refoloseste in
+//                        exportFiles: fiecare pas al listelor ALL descarca doar bucatile grupei lui
 //       terms/<CC>/<g>   partea tarii din pagina fiecarui cuvant vazut in tara (grupa g de fisiere term/*)
 //       apps/<CC>/<g>    partea tarii din pagina fiecarui app (grupa g de fisiere app/*)
 //       info/<CC>        starea tarii, categoriile, problemele, prima zi cu scoruri (pentru `meta` si term/*)
 //       seen/<CC>        cuvintele tarii, cu ultima zi in care au fost vazute (pentru `terms`)
 //  2. din bucatile tuturor tarilor: mergeMeta (meta + terms), mergeLists (list/ALL/*), mergeTermGroup (term/*),
 //     mergeAppGroup (app/*). Fiecare pas citeste doar bucatile lui, deci ruleaza separat, in paralel.
-import { gzipSync, gunzipSync } from 'node:zlib';
+import { gzipSync, gunzipSync, brotliCompressSync, brotliDecompressSync, constants } from 'node:zlib';
 import { COUNTRIES } from '../apple/clients.js';
 import { genreName } from '../apple/genres.js';
 import { makeViews, pickScore, categoriesFrom } from '../local/views.js';
@@ -63,13 +64,19 @@ export function jsonBuffer(value, depth = 3) {
   return out.length === 1 ? out[0] : Buffer.concat(out);
 }
 
-// Fisierele finale: ca in build.js (acelasi JSON, acelasi nivel de compresie).
+// Fisierele finale: ca in build.js (acelasi JSON, acelasi nivel de compresie). Raman gzip: browserul le
+// dezarhiveaza cu DecompressionStream('gzip') (web/remote-api.js).
 export const gzJson = (obj) => gzipSync(jsonBuffer(obj), { level: 6 });
-// Bucatile sunt temporare (citite o data, apoi sterse): compresie mai rapida.
-const gzPiece = (obj) => gzipSync(jsonBuffer(obj), { level: 3 });
-export const fromGz = (buf) => JSON.parse(gunzipSync(buf).toString('utf8'));
+// Bucatile (citite doar de pasii comuni, apoi sterse) sunt brotli 6: cu 20-30% mai mici decat gzip 3, deci mai
+// putin trafic Convex la scriere si la citire, pentru ~0,4 s in plus pe tara. Cu fereastra 22, primul octet al unui
+// brotli nu poate fi 0x1f: o bucata gzip (de la versiunea dinainte) se recunoaste dupa antet.
+export const piece = (obj) => brotliCompressSync(jsonBuffer(obj), {
+  params: { [constants.BROTLI_PARAM_QUALITY]: 6, [constants.BROTLI_PARAM_LGWIN]: 22 },
+});
+const isGzip = (buf) => buf.length >= 2 && buf[0] === 0x1f && buf[1] === 0x8b;
+export const fromPiece = (buf) => JSON.parse((isGzip(buf) ? gunzipSync(buf) : brotliDecompressSync(buf)).toString('utf8'));
 
-// Un fisier cu mai multe bucati gzip: [lungimea antetului (4 octeti)] [antet JSON: [nume, inceput, lungime]...] [bucatile].
+// Un fisier cu mai multe bucati (piece): [lungimea antetului (4 octeti)] [antet JSON: [nume, inceput, lungime]...] [bucatile].
 // Pasul care il citeste dezarhiveaza doar bucatile de care are nevoie.
 export function pack(members) {
   const index = [];
@@ -95,7 +102,7 @@ export function unpack(buf) {
     has: (name) => at.has(name),
     json: (name) => {
       const p = at.get(name);
-      return p ? fromGz(buf.subarray(p[0], p[0] + p[1])) : undefined;
+      return p ? fromPiece(buf.subarray(p[0], p[0] + p[1])) : undefined;
     },
   };
 }
@@ -110,17 +117,35 @@ const binCmp = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b));
 
 // ---- 1. pe baza unei tari ----
 
+// Grupa (indicele in LIST_GROUPS) unei liste dupa nume (list/<CC>/<nume>/...).
+const groupOf = (name) => LIST_GROUPS.findIndex((g) => g.includes(name));
+
 // Da, pe rand: ['file', cheie, gzip] (fisierele finale ale tarii) si ['piece', nume, continut] (bucatile).
 export function* countryParts(db, cc, { log = () => {} } = {}) {
   let t = Date.now();
   const lap = () => { const ms = Date.now() - t; t = Date.now(); return `${Math.round(ms / 100) / 10} s`; };
-  const memo = [];
-  const views = makeViews(db, { memoSink: (key, value) => { if (!key.startsWith('trend:')) memo.push([key, gzPiece(value)]); } });
+  // Bucatile listelor (fara `trend:`, folosite doar in calculul altor bucati), si ce bucati citeste fiecare grupa
+  // de liste: lista ALL a grupei citeste exact bucatile citite de listele tarii din aceeasi grupa (aceleasi chei,
+  // una pe tara). O bucata folosita de doua grupe (ex. meta:<CC>) intra in ambele.
+  const memo = new Map();
+  const used = LIST_GROUPS.map(() => new Set());
+  let group = -1;
+  const views = makeViews(db, {
+    memoSink: (key, value) => { if (!key.startsWith('trend:')) memo.set(key, piece(value)); },
+    memoUse: (key) => { if (group >= 0 && !key.startsWith('trend:')) used[group].add(key); },
+  });
 
-  for (const [key, fn] of listVariants()) if (key.split('/')[1] === cc) yield ['file', key, gzJson(fn(views))];
-  yield ['piece', `memo/${cc}`, pack(memo)];
-  log(`${cc}: liste in ${lap()} (${memo.length} bucati pentru ALL)`);
-  memo.length = 0;
+  for (const [key, fn] of listVariants()) {
+    const [, country, name] = key.split('/');
+    if (country !== cc) continue;
+    group = groupOf(name);
+    if (group < 0) throw new Error(`lista fara grupa in LIST_GROUPS: ${key}`);
+    yield ['file', key, gzJson(fn(views))];
+  }
+  group = -1;
+  for (let g = 0; g < LIST_GROUPS.length; g++) yield ['piece', `memo/${cc}/${g}`, pack([...used[g]].map((key) => [key, memo.get(key)]))];
+  log(`${cc}: liste in ${lap()} (${memo.size} bucati pentru ALL)`);
+  memo.clear();
   views.forget();
 
   // Cuvintele: toate cele vazute sau clasificate in tara (si cele vechi: pagina unui cuvant inca activ in alta tara
@@ -144,7 +169,7 @@ export function* countryParts(db, cc, { log = () => {} } = {}) {
         const e = views.termEntry(cc, term.trim().toLowerCase());
         out[term] = e.history.every((h) => h.score === 0) ? { ...e, history: 0 } : e;
       }
-      members.push([`s${shard}`, gzPiece(out)]);
+      members.push([`s${shard}`, piece(out)]);
     }
     yield ['piece', `terms/${cc}/${g}`, pack(members)];
   }
@@ -157,8 +182,8 @@ export function* countryParts(db, cc, { log = () => {} } = {}) {
   }
   log(`${cc}: ${apps} app-uri in ${lap()}`);
 
-  yield ['piece', `seen/${cc}`, gzPiece(seen.map((r) => [r.term, r.last_seen]))];
-  yield ['piece', `info/${cc}`, gzPiece({
+  yield ['piece', `seen/${cc}`, piece(seen.map((r) => [r.term, r.last_seen]))];
+  yield ['piece', `info/${cc}`, piece({
     country: cc,
     scoresMin: db.prepare('SELECT MIN(date) d FROM scores WHERE country=?').get(cc).d ?? null,
     used: views.usedCategories(cc),
@@ -228,7 +253,7 @@ function* countryAppGroups(db, cc, views) {
           if (h.gr != null) ((a.h ??= {}).gr ??= []).push([h.date, h.gr]);
           if (h.st) ((a.h ??= {}).st ??= []).push([h.date, h.ratings]);
         }
-        members.push([`s${shard}`, gzPiece(out)]);
+        members.push([`s${shard}`, piece(out)]);
       }
       yield [g, members, n];
     }
@@ -267,9 +292,9 @@ export function mergeMeta(infos, seen, { cloud = null } = {}) {
 export const LIST_GROUPS = [['new'], ['rising', 'falling', 'top', 'gone'], ['niches'], ['breakouts', 'changes'], ['apps', 'themes', 'upcoming']];
 
 // Listele ALL ale grupei `group` (null = toate), din bucatile tarilor (vederile fara baza: o bucata lipsa = eroare,
-// nu o lista goala). Bucatile citite raman in memorie doar cat tine familia de variante care le foloseste:
-// new/7/appeared, new/7/discovered si new/7/all citesc aceleasi bucati view:<CC>:new:7 (la fel changes/<p>/*,
-// apps/charts/<p>/*), dar niches/7 si niches/30 nu au nimic comun.
+// nu o lista goala). `bundles` pot fi doar bucatile grupei (memo/<CC>/<g>). Bucatile citite raman in memorie doar
+// cat tine familia de variante care le foloseste: new/7/appeared si new/7/all citesc aceleasi bucati
+// view:<CC>:new:7 (la fel apps/charts/<p>/*), dar niches/7 si niches/30 nu au nimic comun.
 export function* mergeLists(bundles, { group = null } = {}) {
   const cache = new Map();
   const source = (key) => {
@@ -354,11 +379,9 @@ export function* splitExport(dbs, { cloud = null, log = () => {} } = {}) {
       else pieces.set(key, buf);
     }
   }
-  const infos = COUNTRIES.map((cc) => fromGz(pieces.get(`info/${cc}`)));
-  const bundles = (prefix) => COUNTRIES.map((cc) => unpack(pieces.get(`${prefix}/${cc}`)));
-  yield* mergeMeta(infos, COUNTRIES.map((cc) => fromGz(pieces.get(`seen/${cc}`))), { cloud });
-  const memo = bundles('memo');
-  for (const group of LIST_GROUPS) yield* mergeLists(memo, { group });
+  const infos = COUNTRIES.map((cc) => fromPiece(pieces.get(`info/${cc}`)));
+  yield* mergeMeta(infos, COUNTRIES.map((cc) => fromPiece(pieces.get(`seen/${cc}`))), { cloud });
+  for (let g = 0; g < LIST_GROUPS.length; g++) yield* mergeLists(COUNTRIES.map((cc) => unpack(pieces.get(`memo/${cc}/${g}`))), { group: LIST_GROUPS[g] });
   for (let g = 0; g < TERM_GROUPS; g++) yield* mergeTermGroup(g, COUNTRIES.map((cc) => unpack(pieces.get(`terms/${cc}/${g}`))), infos);
   for (let g = 0; g < APP_GROUPS; g++) yield* mergeAppGroup(g, COUNTRIES.map((cc) => unpack(pieces.get(`apps/${cc}/${g}`))));
 }

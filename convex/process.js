@@ -2,15 +2,18 @@
 // Calculul zilei, dupa colectare (sau dupa o incarcare manuala de fisiere zilnice), pe pasi mici (starea pasilor:
 // convex/calc.js; exportul pe tari: src/export/split.js). Convex da unei actiuni Node 10 minute, 512 MB de memorie
 // si ~512 MB de disc temporar; vechea baza cu toate tarile (~450 MB) nu mai incapea pe disc. Acum:
-//  - pasul unei tari (6, in paralel), pe baza ei (SQLite, ~80 MB): baza din copia ei (state db/<CC>) sau, prima
-//    data, din arhiva; bucatile culese azi -> fisierele zilei (arhiva `raw`); fisierele noi din arhiva intra in baza;
-//    curatenia (RETAIN), planul de maine (plan/<CC>), copia bazei; apoi listele tarii (fisiere finale) si bucatile
-//    ei pentru fisierele comune (tabela `pieces`);
+//  - pasul unei tari (6, in paralel), pe baza ei (SQLite, ~100 MB): baza din copia ei (state db/<CC>, vezi
+//    src/export/dbcopy.js) sau, prima data, din arhiva; bucatile culese azi -> fisierele zilei (arhiva `raw`, si
+//    direct in baza); fisierele din arhiva inca neimportate intra in baza; curatenia (RETAIN), planul de maine
+//    (plan/<CC>), copia bazei (o data pe saptamana); apoi listele tarii (fisiere finale) si bucatile ei pentru
+//    fisierele comune (tabela `pieces`);
 //  - pasii comuni (22, in paralel, dupa toate tarile): meta + terms, listele ALL (5 grupe), term/* (8 grupe),
 //    app/* (8 grupe), fiecare doar din bucatile de care are nevoie;
 //  - publicarea (calc.publish): site-ul trece pe generatia noua doar daca are toate fisierele (EXPECTED_FILES).
 // Masurat pe datele reale (Linux, Node 22): un pas de tara ~10 s de calcul si max ~210 MB, un pas comun cateva
 // secunde si max ~215 MB. Calculul greu ruleaza intr-un worker cu memoria limitata (WORKER_HEAP_MB).
+// Traficul Convex (descarcarile si incarcarile din storage se platesc): copia bazei e mica si rescrisa rar,
+// bucatile sunt brotli, iar fiecare pas comun descarca doar bucatile lui (listele ALL: doar grupa lor).
 import crypto from 'node:crypto';
 import v8 from 'node:v8';
 import vm from 'node:vm';
@@ -20,7 +23,7 @@ import path from 'node:path';
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { pipeline } from 'node:stream/promises';
 import { Readable, Writable } from 'node:stream';
-import { gzipSync, gunzipSync, createGzip, createGunzip } from 'node:zlib';
+import { gzipSync, gunzipSync } from 'node:zlib';
 import { internalAction } from './_generated/server';
 import { internal } from './_generated/api';
 import { v } from 'convex/values';
@@ -30,9 +33,10 @@ import { openDb, importFile, isImported, prune, KINDS } from '../src/local/db.js
 import { assembleDay, dayJob } from '../src/collect/worker.js';
 import { appFiles, grossingIds, upcomingTermsFrom } from '../src/collect/steps.js';
 import { collectPlan, appState } from '../src/compute/plan.js';
+import { compactCopy, packStream, unpackStream, copyValue, copyDue } from '../src/export/dbcopy.js';
 import { listVariants, TERM_SHARDS, APP_SHARDS } from '../src/export/build.js';
 import {
-  countryParts, mergeMeta, mergeLists, mergeTermGroup, mergeAppGroup, unpack, fromGz,
+  countryParts, mergeMeta, mergeLists, mergeTermGroup, mergeAppGroup, unpack, fromPiece,
   LIST_GROUPS, TERM_GROUPS, APP_GROUPS,
 } from '../src/export/split.js';
 
@@ -66,7 +70,7 @@ const store = (ctx, buf, type = 'application/gzip') => ctx.storage.store(new Blo
 
 function* jobParts(job, log) {
   const buf = (u8) => Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength);
-  const json = (list) => list.map((u8) => fromGz(buf(u8)));
+  const json = (list) => list.map((u8) => fromPiece(buf(u8)));
   const bundles = (list) => list.map((u8) => unpack(buf(u8)));
   let files;
   switch (job.type) {
@@ -132,7 +136,7 @@ function uploader(ctx, { gen, token }) {
   return {
     counts,
     add(kind, key, b) {
-      const p = store(ctx, b).then(async (storageId) => {
+      const p = store(ctx, b, kind === 'file' ? 'application/gzip' : 'application/octet-stream').then(async (storageId) => {
         (kind === 'file' ? files : pieces).push({ key, storageId });
         counts[kind === 'file' ? 'files' : 'pieces']++;
         counts.bytes += b.length;
@@ -263,22 +267,31 @@ async function runStep(ctx, { token, step }, work) {
 
 // ---- pasul unei tari ----
 
+// Copia bazei (state `name`) in `file`; intoarce starea (value: formatul si ziua copiei) sau null (fara copie).
 async function restoreDb(ctx, name, file) {
   const s = await ctx.runQuery(internal.store.getState, { name });
-  if (!s?.storageIds.length) return false;
-  async function* chunks() { for (const id of s.storageIds) yield await blobOf(ctx, id); }
-  await pipeline(Readable.from(chunks()), createGunzip(), fs.createWriteStream(file));
-  return true;
+  if (!s?.storageIds.length) return null;
+  let packed = 0;
+  async function* chunks() {
+    for (const id of s.storageIds) {
+      const b = await blobOf(ctx, id);
+      packed += b.length;
+      yield b;
+    }
+  }
+  await pipeline(Readable.from(chunks()), unpackStream(s.value?.format), fs.createWriteStream(file));
+  return { ...s, packed };
 }
 
 // Baza tarii din copia ei; fara copie (sau cu o copie stricata), una noua, care se umple din arhiva.
 async function openCountryDb(ctx, cc, file, log) {
   try {
-    if (await restoreDb(ctx, `db/${cc}`, file)) {
+    const copy = await restoreDb(ctx, `db/${cc}`, file);
+    if (copy) {
       const db = openDb(file);
       try {
         db.prepare('SELECT COUNT(*) n FROM imported').get();
-        return { db, restored: true };
+        return { db, restored: true, copy };
       } catch (err) {
         db.close();
         throw err;
@@ -288,25 +301,26 @@ async function openCountryDb(ctx, cc, file, log) {
     log(`copia bazei nu se poate folosi (${err.message}): o refac din arhiva`);
   }
   for (const f of [file, `${file}-wal`, `${file}-shm`]) fs.rmSync(f, { force: true });
-  return { db: openDb(file), restored: false };
+  return { db: openDb(file), restored: false, copy: null };
 }
 
-// Fara copie pe disc (discul temporar e mic): jurnalul WAL se scrie in fisierul bazei, apoi fisierul se comprima
-// direct, in bucati.
-async function saveDb(ctx, db, file, name) {
-  db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+// Copia compacta (src/export/dbcopy.js) se scrie langa baza, se comprima in bucati, apoi se sterge. Copia veche
+// se sterge abia dupa ce cea noua e completa (setState).
+async function saveDb(ctx, db, dir, name, latest) {
+  const out = path.join(dir, 'copy.db');
+  const bytes = compactCopy(db, out);
   const ids = [];
   let parts = [];
   let size = 0;
   let packed = 0;
   const flush = async () => {
     if (!size) return;
-    ids.push(await store(ctx, Buffer.concat(parts, size)));
+    ids.push(await store(ctx, Buffer.concat(parts, size), 'application/octet-stream'));
     packed += size;
     parts = [];
     size = 0;
   };
-  await pipeline(fs.createReadStream(file), createGzip({ level: 4 }), new Writable({
+  await pipeline(fs.createReadStream(out), packStream(), new Writable({
     async write(chunk, _, done) {
       try {
         parts.push(chunk);
@@ -317,22 +331,23 @@ async function saveDb(ctx, db, file, name) {
     },
     async final(done) { try { await flush(); done(); } catch (e) { done(e); } },
   }));
-  const bytes = fs.statSync(file).size;
-  await ctx.runMutation(internal.store.setState, { name, storageIds: ids, value: { bytes } });
+  fs.rmSync(out, { force: true });
+  await ctx.runMutation(internal.store.setState, { name, storageIds: ids, value: copyValue(bytes, latest) });
   return { bytes, packed };
 }
 
-// Bucatile culese azi (ambele benzi ale tarii) -> fisierele zilei, in arhiva. Intoarce starea colectarii tarii
-// (null = azi nu s-a colectat). O zi deja salvata (ex. la o reluare) nu se reface.
+// Bucatile culese azi (ambele benzi ale tarii) -> fisierele zilei, in arhiva, si direct in baza (altfel importNew
+// le-ar descarca inapoi). Intoarce { status: starea colectarii tarii, imported: fisierele importate aici } sau
+// null (azi nu s-a colectat). O zi deja salvata (ex. la o reluare) nu se reface: o importa importNew.
 async function saveCollected(ctx, db, date, cc, log) {
   const rows = await ctx.runQuery(internal.collect.dayJobs, { date, country: cc });
   if (!rows.length || rows.some((r) => r.job.smoke)) return null;
   const job = dayJob(rows.map((r) => r.job));
   const status = { complete: !!job.keywordsOk, requests: job.requests, errors: job.failures };
-  if (await ctx.runQuery(internal.store.rawOf, { kind: 'changes', date, country: cc })) return status;
+  if (await ctx.runQuery(internal.store.rawOf, { kind: 'changes', date, country: cc })) return { status, imported: 0 };
   if (!rows.some((r) => r.parts.length)) {
     log('colectarea nu mai are bucatile culese: ziua nu se poate salva');
-    return status;
+    return { status, imported: 0 };
   }
   const byPhase = {};
   for (const r of rows) {
@@ -341,12 +356,16 @@ async function saveCollected(ctx, db, date, cc, log) {
   const got = assembleDay(job, byPhase);
   const files = appFiles({ date, results: got.lookup, ...appState(db, cc, date), grossing: grossingIds(got.charts) });
   const out = { days: got.day, classify: got.classify, apps: files.meta, stats: files.stats, changes: files.changes };
+  // In ordinea KINDS, ca importNew; in baza intra exact ce citeste importNew din arhiva (JSON.parse al aceluiasi
+  // text) si cu aceeasi marime (isImported il recunoaste apoi ca importat).
   for (const kind of KINDS) {
-    const buf = gzipSync(JSON.stringify(out[kind]));
+    const text = JSON.stringify(out[kind]);
+    const buf = gzipSync(text);
     await ctx.runMutation(internal.store.saveRaw, { kind, date, country: cc, storageId: await store(ctx, buf), size: buf.length });
+    importFile(db, { kind, date, country: cc, value: JSON.parse(text), size: buf.length });
   }
   log(`ziua salvata: ${got.day.suggest.length} sugestii, ${Object.keys(got.classify).length} clasificate, ${Object.keys(files.stats).length} app-uri`);
-  return status;
+  return { status, imported: KINDS.length };
 }
 
 // Fisierele tarii din arhiva, ca importAll(..., { countries: [cc] }): pe tipuri (KINDS), apoi pe zile.
@@ -399,30 +418,41 @@ async function countryWork(ctx, { date, gen, token, step, dir, log }) {
   const file = path.join(dir, `${cc}.db`);
   let t = Date.now();
   const lap = () => { const s = secs(Date.now() - t); t = Date.now(); return s; };
-  const { db, restored } = await openCountryDb(ctx, cc, file, log);
+  const { db, restored, copy } = await openCountryDb(ctx, cc, file, log);
   let info;
   try {
-    // Intai istoricul care lipseste bazei (fara copie: toata arhiva tarii), ca fisierele zilei (app-urile noi,
-    // redenumirile, versiunile noi: appState) sa se faca fata de tot ce stim; apoi fisierele zilei.
+    // Intai istoricul care lipseste bazei (fara copie: toata arhiva tarii; cu o copie de acum cateva zile: zilele
+    // de dupa ea), ca fisierele zilei (app-urile noi, redenumirile, versiunile noi: appState) sa se faca fata de tot
+    // ce stim; apoi fisierele zilei. Importul nu depinde de curatenie (prune sterge doar zilele vechi, iar ce sterge
+    // azi ar fi sters si maine), deci copia mai veche + zilele de dupa ea = aceeasi baza ca o copie de ieri.
     const early = await importNew(ctx, db, cc, { before: date });
     const collected = await saveCollected(ctx, db, date, cc, log);
     const late = await importNew(ctx, db, cc);
-    const imported = early.imported + late.imported;
+    const imported = early.imported + (collected?.imported ?? 0) + late.imported;
     const problems = early.problems + late.problems;
     prune(db);
-    const planId = await store(ctx, Buffer.from(JSON.stringify(collectPlan(db, cc))), 'application/json');
-    await ctx.runMutation(internal.store.setState, { name: `plan/${cc}`, storageIds: [planId] });
+    // Planul de maine in doua fisiere: lista cuvintelor (`terms`, ~85% din plan) o citeste doar clasificarea
+    // (convex/collect.js), restul il citeste fiecare pas al colectarii care isi face lista.
+    const { terms, ...plan } = collectPlan(db, cc);
+    const planIds = [];
+    for (const part of [plan, terms]) planIds.push(await store(ctx, Buffer.from(JSON.stringify(part)), 'application/json'));
+    await ctx.runMutation(internal.store.setState, { name: `plan/${cc}`, storageIds: planIds, value: { split: true } });
     // Starea colectarii, pentru interfata (vezi pasul meta): cea de azi sau, la o incarcare manuala, ultima zi din baza.
     const latest = db.prepare('SELECT MAX(date) d FROM days WHERE country=?').get(cc).d ?? null;
     const row = latest ? db.prepare('SELECT complete, requests, errors FROM days WHERE country=? AND date=?').get(cc, latest) : null;
     info = {
       collected: !!collected,
       latest,
-      status: collected ?? (row ? { complete: !!row.complete, requests: row.requests, errors: row.errors } : { missing: true, error: 'missing' }),
+      status: collected?.status ?? (row ? { complete: !!row.complete, requests: row.requests, errors: row.errors } : { missing: true, error: 'missing' }),
     };
-    const saved = await saveDb(ctx, db, file, `db/${cc}`);
-    log(`baza ${restored ? 'din copie' : 'noua, din arhiva'}: ${imported} fisiere importate${problems ? `, ${problems} stricate` : ''}; `
-      + `${mbOf(saved.bytes)}, copia ${mbOf(saved.packed)} (${lap()})`);
+    const from = restored ? `din copie (${copy.value?.latest ?? '?'}, ${mbOf(copy.packed)})` : 'noua, din arhiva';
+    const head = `baza ${from}: ${imported} fisiere importate${problems ? `, ${problems} stricate` : ''}`;
+    if (copyDue(copy?.value, latest, { restored })) {
+      const saved = await saveDb(ctx, db, dir, `db/${cc}`, latest);
+      log(`${head}; copie noua ${mbOf(saved.bytes)} -> ${mbOf(saved.packed)} (${lap()})`);
+    } else {
+      log(`${head}; copia ramane (${lap()})`);
+    }
   } finally {
     db.close();
   }
@@ -450,7 +480,7 @@ function piecesFor(kind, g) {
   const each = (prefix, suffix = '') => COUNTRIES.map((cc) => `${prefix}/${cc}${suffix}`);
   switch (kind) {
     case 'meta': return { infos: each('info'), seen: each('seen') };
-    case 'lists': return { memo: each('memo') };
+    case 'lists': return { memo: each('memo', `/${g}`) };
     case 'terms': return { terms: each('terms', `/${g}`), infos: each('info') };
     case 'apps': return { apps: each('apps', `/${g}`) };
     default: throw new Error(`pas necunoscut: ${kind}`);

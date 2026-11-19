@@ -10,12 +10,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable, Writable } from 'node:stream';
-import { createGunzip, createGzip, gunzipSync } from 'node:zlib';
+import { gunzipSync } from 'node:zlib';
 import { COUNTRIES } from '../apple/clients.js';
 import { openDb, importFile, isImported, prune, KINDS } from '../local/db.js';
 import { collectPlan } from '../compute/plan.js';
 import { listVariants, TERM_SHARDS, APP_SHARDS } from './build.js';
 import { splitExport } from './split.js';
+import { compactCopy, packStream, unpackStream, copyValue } from './dbcopy.js';
 
 const SITE = process.env.CONVEX_SITE_URL?.replace(/\/$/, '');
 const SECRET = process.env.INGEST_SECRET;
@@ -79,7 +80,7 @@ async function openCountryDb(copy, file) {
   if (copy?.urls?.length) {
     try {
       async function* chunks() { for (const u of copy.urls) yield await download(u); }
-      await pipeline(Readable.from(chunks()), createGunzip(), fs.createWriteStream(file));
+      await pipeline(Readable.from(chunks()), unpackStream(copy.format), fs.createWriteStream(file));
       const db = openDb(file);
       try {
         db.prepare('SELECT COUNT(*) n FROM imported').get();
@@ -126,19 +127,21 @@ async function importNew(db, rows) {
   return { imported: todo.length - problems, problems };
 }
 
-// Baza inapoi in Convex (in bucati gzip); copia veche se sterge abia dupa ce cea noua e completa (setState).
-async function saveDb(db, file, name) {
-  db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+// Baza inapoi in Convex (copia compacta, brotli, in bucati: src/export/dbcopy.js); copia veche se sterge abia
+// dupa ce cea noua e completa (setState).
+async function saveDb(db, file, name, latest) {
+  const out = `${file}.copy`;
+  const bytes = compactCopy(db, out);
   const ids = [];
   let parts = [];
   let size = 0;
-  const flush = async () => { if (size) { ids.push(await blob(Buffer.concat(parts, size))); parts = []; size = 0; } };
-  await pipeline(fs.createReadStream(file), createGzip({ level: 4 }), new Writable({
+  const flush = async () => { if (size) { ids.push(await blob(Buffer.concat(parts, size), 'application/octet-stream')); parts = []; size = 0; } };
+  await pipeline(fs.createReadStream(out), packStream(), new Writable({
     async write(chunk, _, done) { try { parts.push(chunk); size += chunk.length; if (size >= DB_CHUNK) await flush(); done(); } catch (e) { done(e); } },
     async final(done) { try { await flush(); done(); } catch (e) { done(e); } },
   }));
-  const bytes = fs.statSync(file).size;
-  await setState(name, { storageIds: ids, value: { bytes } });
+  fs.rmSync(out, { force: true });
+  await setState(name, { storageIds: ids, value: copyValue(bytes, latest) });
   return bytes;
 }
 
@@ -159,12 +162,15 @@ try {
     dbs.set(cc, db);
     const { imported, problems } = await importNew(db, raw.filter((r) => r.country === cc));
     prune(db);
-    const planId = await blob(Buffer.from(JSON.stringify(collectPlan(db, cc))), 'application/json');
-    await setState(`plan/${cc}`, { storageIds: [planId] });
+    // Ca in process.js: planul si lista cuvintelor lui (citita doar de clasificare), in doua fisiere.
+    const { terms, ...plan } = collectPlan(db, cc);
+    const planIds = [];
+    for (const part of [plan, terms]) planIds.push(await blob(Buffer.from(JSON.stringify(part)), 'application/json'));
+    await setState(`plan/${cc}`, { storageIds: planIds, value: { split: true } });
     const latest = db.prepare('SELECT MAX(date) d FROM days WHERE country=?').get(cc).d ?? null;
     const row = latest ? db.prepare('SELECT complete, requests, errors FROM days WHERE country=? AND date=?').get(cc, latest) : null;
     infos[cc] = { latest, status: row ? { complete: !!row.complete, requests: row.requests, errors: row.errors } : null };
-    const bytes = await saveDb(db, file, `db/${cc}`);
+    const bytes = await saveDb(db, file, `db/${cc}`, latest);
     console.log(`${cc}: baza ${restored ? 'din copie' : 'noua, din arhiva'}, ${imported} fisiere importate`
       + `${problems ? `, ${problems} stricate` : ''}; ${mb(bytes)} salvata (${secs()})`);
   }

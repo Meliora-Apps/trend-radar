@@ -4,6 +4,7 @@ import { COUNTRIES } from '../src/apple/clients.js';
 import { keywordSource } from '../src/metrics/appwords.js';
 import { saturated } from '../src/metrics/niche.js';
 import { shardOf, TERM_SHARDS, APP_SHARDS } from '../src/export/shard.js';
+import { CHANGE_PERIODS, CHANGES_SPAN, isChangeFile, pickChanges } from '../src/export/changes.js';
 import { toCsv } from '../src/local/csv.js';
 
 const MAX_ROWS = 1500;
@@ -45,12 +46,14 @@ export function makeRemoteApi(convex) {
     return v === Number(category);
   };
   const page = (rows, extra = {}) => ({ total: rows.length, rows: rows.slice(0, MAX_ROWS), ...extra });
+  const inOrigin = (q) => (r) => q.get('name') !== 'new' || q.get('origin') !== 'discovered' || r.origin === 'discovered';
 
+  // Cuvintele noi "descoperite" nu au fisier: sunt randurile din `all` cu origin 'discovered' (src/export/build.js).
   function listKey(q) {
     const cc = q.get('country') ?? 'US';
     const name = q.get('name');
     const p = Number(q.get('period')) || 7;
-    if (name === 'new') return `list/${cc}/new/${[1, 7, 30].includes(p) ? p : 7}/${q.get('origin') ?? 'all'}`;
+    if (name === 'new') return `list/${cc}/new/${[1, 7, 30].includes(p) ? p : 7}/${q.get('origin') === 'appeared' ? 'appeared' : 'all'}`;
     if (name === 'rising' || name === 'falling') return `list/${cc}/${name}/${p >= 30 ? 30 : 7}`;
     if (name === 'gone') return `list/${cc}/gone`;
     return `list/${cc}/top`;
@@ -80,7 +83,7 @@ export function makeRemoteApi(convex) {
     '/api/view': async (q) => {
       const r = await one(listKey(q));
       if (!r) return { total: 0, rows: [], meta: {} };
-      return page(r.rows.filter(inCategory(q.get('category'))), { meta: r.meta });
+      return page(r.rows.filter(inOrigin(q)).filter(inCategory(q.get('category'))), { meta: r.meta });
     },
     '/api/niches': async (q) => {
       const p = [7, 14, 30].includes(Number(q.get('period'))) ? Number(q.get('period')) : 14;
@@ -97,10 +100,20 @@ export function makeRemoteApi(convex) {
       if (!r) return { total: 0, rows: [], measured: 0 };
       return page(r.rows.filter(inCategory(q.get('category'))), { measured: r.measured });
     },
+    // Doar unele variante au fisier (CHANGE_FILES); celelalte se filtreaza din lista pe 30 de zile, dupa `since`
+    // (src/export/changes.js). Un export mai vechi (fara `since`) avea fiecare varianta in fisierul ei.
     '/api/changes': async (q) => {
-      const p = [7, 14, 30].includes(Number(q.get('period'))) ? Number(q.get('period')) : 7;
-      const r = await one(`list/${q.get('country') ?? 'US'}/changes/${p}/${q.get('who') === 'all' ? 'all' : 'money'}`);
-      return r ? page(r.rows.filter(inCategory(q.get('category')))) : { total: 0, rows: [] };
+      const cc = q.get('country') ?? 'US';
+      const p = CHANGE_PERIODS.includes(Number(q.get('period'))) ? Number(q.get('period')) : 7;
+      const who = q.get('who') === 'all' ? 'all' : 'money';
+      const own = `list/${cc}/changes/${p}/${who}`;
+      let rows = null;
+      if (!isChangeFile(p, who)) {
+        const full = await one(`list/${cc}/changes/${CHANGES_SPAN}/all`);
+        if (full?.since) rows = pickChanges(full.rows, full.since, p, who);
+      }
+      if (!rows) rows = (await one(own))?.rows;
+      return rows ? page(rows.filter(inCategory(q.get('category')))) : { total: 0, rows: [] };
     },
     '/api/new-apps': async (q) => {
       const cc = q.get('country') ?? 'US';
@@ -183,7 +196,7 @@ export function makeRemoteApi(convex) {
   async function csv(href) {
     const q = new URL(href, location.origin).searchParams;
     const r = await one(listKey(q));
-    const rows = (r?.rows ?? []).filter(inCategory(q.get('category')));
+    const rows = (r?.rows ?? []).filter(inOrigin(q)).filter(inCategory(q.get('category')));
     const blob = new Blob([`﻿${toCsv(rows)}`], { type: 'text/csv;charset=utf-8' });
     const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `trend-radar-${q.get('name')}.csv` });
     a.click();
