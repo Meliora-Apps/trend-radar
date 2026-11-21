@@ -43,6 +43,32 @@ export const newJob = (country, date, lane = null) => ({
   aborted: false, suggested: 0, keywordsOk: null, classifyUntil: null,
 });
 
+// Verificarea unei benzi terminate, inainte de calculul zilei: ce s-ar pierde daca ziua s-ar calcula asa.
+// Topurile si lansarile noi se pot lua DOAR in ziua lor (a doua zi Apple arata altele), deci o banda cu lipsuri se
+// reia (vezi MAX_LANE_RETRIES in convex/collect.js). Pragurile: cate cereri trebuie sa fi reusit din fiecare pas.
+// Pasii cu cautare (clasificarea, precomenzile) nu intra aici: cand Apple blocheaza cautarea adresei, reluarea
+// n-ajuta, iar coada clasificarii continua a doua zi.
+export const LANE_MIN_OK = { base: 0.95, expand: 0.9, charts: 0.95, feed: 1, lookup: 0.9 };
+const PHASE_NAMES = { base: 'sugestiile de baza', expand: 'sugestiile extinse', charts: 'topurile', feed: 'lansarile noi', lookup: 'datele app-urilor' };
+export function laneProblems(job) {
+  if (job.smoke) return [];
+  const out = [];
+  if (job.aborted) out.push('oprita: prea multe erori Apple');
+  if (job.lane !== 'apps' && job.keywordsOk === false && !job.aborted) out.push('cuvintele zilei incomplete');
+  for (const [phase, min] of Object.entries(LANE_MIN_OK)) {
+    const s = job.summary?.[phase];
+    if (!s) {
+      const seq = job.lane ? LANES[job.lane] : PHASES;
+      if (job.aborted && seq.includes(phase)) out.push(`${PHASE_NAMES[phase]}: lipsesc`);
+      continue;
+    }
+    if (s.n > 0 && s.ok / s.n < min) out.push(`${PHASE_NAMES[phase]}: ${s.ok} din ${s.n}`);
+  }
+  return out;
+}
+// Cat a cules o banda (suma cererilor reusite): dintre doua incercari ale aceleiasi benzi o pastram pe cea mai buna.
+export const laneScore = (job) => Object.values(job.summary ?? {}).reduce((n, s) => n + s.ok, 0);
+
 // Benzile unei tari -> o singura stare, pentru assembleDay: cuvintele decid daca ziua e completa,
 // cererile si erorile se aduna.
 export function dayJob(jobs) {
@@ -151,6 +177,7 @@ export async function work(job, { apple, items, prep, deadline, clock = Date.now
     const item = items[j.pos];
     try {
       out.push(await doItem(j, item, apple, grossing));
+      j.ok = (j.ok ?? 0) + 1;
       if (j.phase === 'base' || j.phase === 'expand') j.suggested++;
       denied = 0;
       if (search) gateSaw(false);
@@ -170,6 +197,9 @@ export async function work(job, { apple, items, prep, deadline, clock = Date.now
       // Ziua e completa daca am cules cuvintele (pasii base + expand), ca in runCountry.
       j.keywordsOk ??= !j.smoke && !j.aborted && counter.failureRate() <= MAX_FAILURE_RATE && j.suggested > 0;
     }
+    // Cate cereri ale pasului au reusit (pentru laneProblems: verificarea zilei inainte de calcul).
+    j.summary = { ...(j.summary ?? {}), [j.phase]: { n: items.length, ok: j.ok ?? 0 } };
+    j.ok = 0;
     j.phase = j.aborted ? 'done' : next(j);
     j.pos = 0;
   }

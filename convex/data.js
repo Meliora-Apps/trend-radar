@@ -11,7 +11,9 @@ export const me = query({
   handler: async (ctx) => {
     const email = await allowedEmail(ctx);
     const cur = email ? await current(ctx) : null;
-    return { email, gen: cur?.gen ?? null, at: cur?.at ?? null };
+    // Verificarea zilnica (convex/health.js): site-ul arata problemele zilei.
+    const health = email ? (await ctx.db.query('state').withIndex('by_name', (q) => q.eq('name', 'health')).unique())?.value ?? null : null;
+    return { email, gen: cur?.gen ?? null, at: cur?.at ?? null, health };
   },
 });
 

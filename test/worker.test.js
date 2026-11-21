@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runCountry } from '../src/collect/run-country.js';
-import { newJob, phaseItems, preparePhase, work, assembleDay, dayJob, LANES, SEARCH_BLOCKED_AFTER, SEARCH_BLOCKED_SHARED, SEARCH_GATE_STALE_MS, SEARCH_MIN_MS } from '../src/collect/worker.js';
+import { newJob, phaseItems, preparePhase, work, assembleDay, dayJob, laneProblems, laneScore, LANES, SEARCH_BLOCKED_AFTER, SEARCH_BLOCKED_SHARED, SEARCH_GATE_STALE_MS, SEARCH_MIN_MS } from '../src/collect/worker.js';
 import { HttpError, OutOfTime } from '../src/apple/net.js';
 import { appFiles, grossingIds } from '../src/collect/steps.js';
 import { collectPlan, appState } from '../src/compute/plan.js';
@@ -242,4 +242,29 @@ test('Convex: 403 la rand la cautare in toate tarile (gate comun) opresc pasii c
   assert.equal(r.job.blocked, undefined);
   assert.equal(r.job.requests, 1);
   assert.equal(stale.denied, 1);
+});
+
+test('verificarea benzii (inainte de calcul): o zi buna n-are probleme, una cu topurile refuzate (13 nov) are', async () => {
+  const words = await collectInChunks({ date: '2026-03-05', plan: null, apple: fakeApple(5), lane: 'words' });
+  const apps = await collectInChunks({ date: '2026-03-05', plan: null, apple: fakeApple(5), lane: 'apps' });
+  assert.deepEqual(laneProblems(words.job), []);
+  assert.deepEqual(laneProblems(apps.job), []);
+  assert.ok(laneScore(apps.job) > 100);
+  assert.equal(apps.job.summary.charts.ok, apps.job.summary.charts.n);
+
+  // Ca pe 13 nov: Apple refuza o parte din topuri -> banda de app-uri se opreste, lookup nu mai ruleaza.
+  const bad = fakeApple(5);
+  let k = 0;
+  const chart = bad.chart;
+  bad.chart = (...a) => (++k % 4 === 0 ? bad.counter.track(async () => { throw new HttpError(403, 'rss'); }) : chart(...a));
+  const r = await collectInChunks({ date: '2026-03-05', plan: null, apple: bad, lane: 'apps' });
+  const p = laneProblems(r.job);
+  assert.ok(p.includes('oprita: prea multe erori Apple'), p.join('; '));
+  assert.ok(p.some((x) => x.startsWith('datele app-urilor')), p.join('; '));
+  assert.ok(laneScore(r.job) < laneScore(apps.job));
+
+  // Cateva erori izolate (sub prag) nu cer reluare.
+  assert.deepEqual(laneProblems({ lane: 'apps', summary: { charts: { n: 120, ok: 118 }, feed: { n: 2, ok: 2 }, lookup: { n: 230, ok: 229 } } }), []);
+  assert.deepEqual(laneProblems({ lane: 'apps', summary: { charts: { n: 120, ok: 100 }, feed: { n: 2, ok: 2 }, lookup: { n: 230, ok: 229 } } }), ['topurile: 100 din 120']);
+  assert.deepEqual(laneProblems({ lane: 'words', smoke: true, aborted: true }), []);
 });

@@ -8,6 +8,7 @@ import { v } from 'convex/values';
 import { COUNTRIES, makeAppleClient } from '../src/apple/clients.js';
 import { makePacer, makeRetry } from '../src/apple/net.js';
 import { LANES, newJob, phaseItems, preparePhase, work } from '../src/collect/worker.js';
+import { checkLanes, noPrev } from '../src/collect/check.js';
 import { todayUTC } from '../src/util/dates.js';
 
 const TICK_MS = 4 * 60_000; // o bucata de lucru (plus reincercarile in curs: max ~2 min)
@@ -37,6 +38,8 @@ const PAUSE_MS = 20_000;
 // Pasii cu cautare (clasificarea, precomenzile) se incheie la atat dupa pornirea colectarii (vezi SEARCH_MIN_MS
 // in src/collect/worker.js), ca ziua sa fie gata in ~30 de minute; restul pasilor merg pana la capat.
 const SEARCH_WINDOW_MS = 30 * 60_000;
+// Verificarea zilei inainte de calcul, cu reluarea benzilor cu lipsuri: src/collect/check.js.
+const isWaiting = (job, t) => job.phase !== 'done' && job.waitUntil != null && job.waitUntil > t;
 
 const runOf = (ctx, date) => ctx.db.query('runs').withIndex('by_date', (q) => q.eq('date', date)).unique();
 const jobsOf = (ctx, date) => ctx.db.query('jobs').withIndex('by_date_country', (q) => q.eq('date', date)).collect();
@@ -51,7 +54,7 @@ export const start = internalMutation({
     if (run && !force) return `ziua ${date} e deja ${run.status}`;
     if (run) {
       for (const j of await jobsOf(ctx, date)) {
-        for (const p of j.parts) await ctx.storage.delete(p.storageId);
+        for (const p of [...j.parts, ...(j.job.prev?.parts ?? [])]) await ctx.storage.delete(p.storageId);
         if (j.prepId) await ctx.storage.delete(j.prepId);
         await ctx.db.delete(j._id);
       }
@@ -157,9 +160,11 @@ export const tick = internalAction({
     const pacers = Object.fromEntries(Object.entries(PACE).map(([k, [min, max]]) => [k, makePacer(min, { maxMs: max, pauseMs: PAUSE_MS, startMs: claimed.pace?.[k], until: deadline })]));
     const retry = makeRetry({ retries: 4, baseDelayMs: 5_000, rateLimitDelayMs: 0, log });
     const gate = { denied: 0, ...claimed.searchGate }; // 403 la rand la cautare, in toate benzile (SEARCH_BLOCKED_SHARED)
-    const updates = await Promise.all(jobs.filter((j) => j.job.phase !== 'done').map((j) => runLane(ctx, j, { deadline, log, pacers, retry, gate })));
+    const t0 = Date.now();
+    const active = jobs.filter((j) => j.job.phase !== 'done' && !isWaiting(j.job, t0));
+    const updates = await Promise.all(active.map((j) => runLane(ctx, j, { deadline, log, pacers, retry, gate })));
     const pace = Object.fromEntries(Object.entries(pacers).map(([k, p]) => [k, p.stats().intervalMs]));
-    log(`ritm: ${Object.entries(pacers).map(([k, p]) => { const s = p.stats(); return `${k} ${s.intervalMs} ms${s.pauses ? ` (${s.pauses} pauze dupa 429)` : ''}`; }).join(', ')}`);
+    if (active.length) log(`ritm: ${Object.entries(pacers).map(([k, p]) => { const s = p.stats(); return `${k} ${s.intervalMs} ms${s.pauses ? ` (${s.pauses} pauze dupa 429)` : ''}`; }).join(', ')}`);
 
     // Salvare + urmatoarea bucata (sau calculul zilei, cand toate tarile au terminat), in aceeasi mutatie.
     const searchGate = { denied: gate.denied, ...(gate.at != null ? { at: gate.at } : {}) };
@@ -168,10 +173,11 @@ export const tick = internalAction({
 });
 
 // Urmatoarea actiune a zilei (o bucata de colectare sau calculul) + verificarea ca a pornit (kick).
-async function handOff(ctx, date, fn) {
-  await ctx.scheduler.runAfter(0, fn, { date });
-  await ctx.scheduler.runAfter(START_GRACE_MS, internal.collect.kick, { date });
+async function handOff(ctx, date, fn, delay = 0) {
+  await ctx.scheduler.runAfter(delay, fn, { date });
+  await ctx.scheduler.runAfter(delay + START_GRACE_MS, internal.collect.kick, { date });
 }
+
 
 // O actiune predata (handOff) care n-a pornit: ziua nu e rezervata (lease), deci o programez din nou (o data;
 // apoi o reia paznicul).
@@ -206,10 +212,20 @@ export const progress = internalMutation({
       await ctx.db.patch(u.id, { job: u.job, parts: [...j.parts, ...u.added], prepId: u.prepId ?? undefined });
     }
     const run = await runOf(ctx, date);
-    const jobs = await jobsOf(ctx, date);
-    const done = jobs.every((j) => j.job.phase === 'done');
+    let jobs = await jobsOf(ctx, date);
+    let done = jobs.every((j) => j.job.phase === 'done');
     // O proba (smoke) doar arata ca merge: nu intra in arhiva si nu se calculeaza.
     const smoke = done && jobs.some((j) => j.job.smoke);
+    let quality = null;
+    if (done && !smoke) {
+      const checked = await checkLanes(ctx, jobs, log);
+      if (checked.retried) { done = false; jobs = await jobsOf(ctx, date); } else quality = checked.quality;
+    }
+    // Benzile ramase asteapta toate o reluare: urmatoarea bucata la prima trezire (lease = pana atunci, ca paznicul
+    // si kick sa nu porneasca bucati goale intre timp).
+    const t = Date.now();
+    const pending = jobs.filter((j) => j.job.phase !== 'done');
+    const wake = !done && pending.length && pending.every((j) => isWaiting(j.job, t)) ? Math.min(...pending.map((j) => j.job.waitUntil)) : null;
     if (smoke) {
       for (const j of jobs) {
         for (const p of j.parts) await ctx.storage.delete(p.storageId);
@@ -218,10 +234,11 @@ export const progress = internalMutation({
       }
     }
     await ctx.db.patch(run._id, {
-      lease: 0, log: [...run.log, ...log].slice(-LOG_MAX), ...(pace ? { pace } : {}), ...(searchGate ? { searchGate } : {}),
+      lease: wake ? wake - 5_000 : 0, log: [...run.log, ...log].slice(-LOG_MAX), ...(pace ? { pace } : {}), ...(searchGate ? { searchGate } : {}),
+      ...(quality ? { quality } : {}),
       ...(smoke ? { status: 'done', finishedAt: Date.now() } : done ? { status: 'processing' } : {}),
     });
-    if (!smoke) await handOff(ctx, date, done ? internal.process.run : internal.collect.tick);
+    if (!smoke) await handOff(ctx, date, done ? internal.process.run : internal.collect.tick, wake ? wake - t : 0);
   },
 });
 
@@ -263,9 +280,9 @@ export async function finishRun(ctx, { date, status, error, log }) {
   if (!run) return;
   if (status === 'done') {
     for (const j of await jobsOf(ctx, date)) {
-      for (const p of j.parts) await ctx.storage.delete(p.storageId);
+      for (const p of [...j.parts, ...(j.job.prev?.parts ?? [])]) await ctx.storage.delete(p.storageId);
       if (j.prepId) await ctx.storage.delete(j.prepId);
-      await ctx.db.patch(j._id, { parts: [], prepId: undefined });
+      await ctx.db.patch(j._id, { parts: [], prepId: undefined, ...(j.job.prev ? { job: noPrev(j.job) } : {}) });
     }
   }
   // Un calcul esuat se reia de paznic (status 'processing'), de cel mult MAX_ATTEMPTS ori.

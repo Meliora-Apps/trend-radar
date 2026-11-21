@@ -107,7 +107,20 @@ async function start() {
   foot.insertAdjacentHTML('beforeend', `<p class="muted small who">${me.email} · <a href="#" id="signout">Ieșire</a></p>`);
   foot.querySelector('#signout').addEventListener('click', (e) => { e.preventDefault(); signOut(); });
   if (!me.gen) document.querySelector('#notice').innerHTML = '<div class="notice">Datele încă n-au fost publicate online. Apar după prima colectare.</div>';
+  else document.querySelector('#notice').innerHTML = healthNotice(me.health);
   await import('../src/local/public/app.js');
+}
+
+// Verificarea zilnica (convex/health.js): problemele zilei (rosu) si ce e doar de stiut (albastru), cele din ultimele 2 zile.
+function healthNotice(h) {
+  if (!h || Date.now() - h.at > 2 * 864e5) return '';
+  const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const when = new Date(h.at).toLocaleString('ro-RO', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const list = (lvl) => h.issues.filter((i) => i.level === lvl).map((i) => `<li>${esc(i.text)}</li>`).join('');
+  const bad = list('bad');
+  const info = list('info');
+  return (bad ? `<div class="notice bad"><b>Verificarea zilei ${esc(h.date)} (${when}) a găsit probleme:</b><ul>${bad}</ul></div>` : '')
+    + (info ? `<div class="notice info"><b>Verificarea zilei ${esc(h.date)} (${when}):</b><ul>${info}</ul></div>` : '');
 }
 
 // Doar in `npm run web` (dezvoltare, Convex local cu DEV_LOGIN_SECRET): logare de test fara Google.

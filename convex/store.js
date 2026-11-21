@@ -82,7 +82,7 @@ const REFS = {
   raw: (d) => [d.storageId],
   pieces: (d) => [d.storageId],
   state: (d) => d.storageIds ?? [],
-  jobs: (d) => [...d.parts.map((p) => p.storageId), ...(d.prepId ? [d.prepId] : [])],
+  jobs: (d) => [...d.parts, ...(d.job?.prev?.parts ?? [])].map((p) => p.storageId).concat(d.prepId ? [d.prepId] : []),
 };
 
 export const refsPage = internalQuery({

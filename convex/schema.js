@@ -36,6 +36,8 @@ export default defineSchema({
     pace: v.optional(v.any()), // ritmul cererilor Apple atins de ultima bucata (vezi PACE in collect.js)
     // Refuzurile (403) la rand la cautare, in toate tarile, si ora ultimului (SEARCH_BLOCKED_SHARED in worker.js).
     searchGate: v.optional(v.object({ denied: v.number(), at: v.optional(v.number()) })),
+    // Verificarea zilei inainte de calcul (checkLanes in collect.js): pe tara, ce a lipsit si cate reluari.
+    quality: v.optional(v.any()),
     log: v.array(v.string()),
   }).index('by_date', ['date']).index('by_status', ['status']),
   // Calculul unei zile, pe pasi (vezi convex/calc.js si convex/process.js): pasii tarilor, apoi pasii comuni.

@@ -10,11 +10,14 @@
 
 import type * as access from "../access.js";
 import type * as admin from "../admin.js";
+import type * as appChecks from "../appChecks.js";
 import type * as apple from "../apple.js";
 import type * as auth from "../auth.js";
+import type * as calc from "../calc.js";
 import type * as collect from "../collect.js";
 import type * as crons from "../crons.js";
 import type * as data from "../data.js";
+import type * as health from "../health.js";
 import type * as http from "../http.js";
 import type * as process from "../process.js";
 import type * as store from "../store.js";
@@ -28,11 +31,14 @@ import type {
 declare const fullApi: ApiFromModules<{
   access: typeof access;
   admin: typeof admin;
+  appChecks: typeof appChecks;
   apple: typeof apple;
   auth: typeof auth;
+  calc: typeof calc;
   collect: typeof collect;
   crons: typeof crons;
   data: typeof data;
+  health: typeof health;
   http: typeof http;
   process: typeof process;
   store: typeof store;
