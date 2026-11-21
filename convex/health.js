@@ -27,14 +27,20 @@ export const save = internalMutation({
   },
 });
 
-async function notify(title, text, { priority = 'high', tags = 'warning' } = {}) {
+// Publicarea JSON a ntfy (accepta diacritice in titlu; antetele HTTP nu). O notificare care nu pleaca nu opreste
+// verificarea: problema ramane oricum pe site.
+async function notify(title, message, { priority = 4, tags = ['warning'] } = {}) {
   const topic = process.env.ALERT_NTFY_TOPIC;
   if (!topic) return 'fara ALERT_NTFY_TOPIC: notificarea nu pleaca';
-  const res = await fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
-    method: 'POST', body: text,
-    headers: { Title: title, Priority: priority, Tags: tags, Click: 'https://trend-radar.meliorapps.uk' },
-  });
-  return res.ok ? 'notificare trimisa' : `ntfy a raspuns HTTP ${res.status}`;
+  try {
+    const res = await fetch('https://ntfy.sh/', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic, title, message, priority, tags, click: 'https://trend-radar.meliorapps.uk' }),
+    });
+    return res.ok ? 'notificare trimisa' : `ntfy a raspuns HTTP ${res.status}`;
+  } catch (err) {
+    return `notificarea n-a plecat: ${err.message}`;
+  }
 }
 
 // npx convex run --prod health:check '{"final":true}'   (implicit: ziua de azi, UTC)
@@ -46,7 +52,7 @@ export const check = internalAction({
     await ctx.runMutation(internal.health.save, { health: h });
     let sent = '';
     if (!h.ok) sent = await notify(`Trend Radar: problemă cu ziua ${date}`, alertText(h));
-    else if (prev && prev.date === date && !prev.ok) sent = await notify(`Trend Radar: ziua ${date} e în regulă acum`, 'Problema de mai devreme s-a rezolvat.', { priority: 'default', tags: 'white_check_mark' });
+    else if (prev && prev.date === date && !prev.ok) sent = await notify(`Trend Radar: ziua ${date} e în regulă acum`, 'Problema de mai devreme s-a rezolvat.', { priority: 3, tags: ['white_check_mark'] });
     console.log(JSON.stringify(h), sent);
     return { ...h, sent };
   },
@@ -55,5 +61,5 @@ export const check = internalAction({
 // Proba canalului: npx convex run --prod health:test
 export const test = internalAction({
   args: {},
-  handler: () => notify('Trend Radar: probă', 'Dacă vezi asta, alertele ajung la tine.', { priority: 'default', tags: 'bell' }),
+  handler: () => notify('Trend Radar: probă', 'Dacă vezi asta, alertele ajung la tine.', { priority: 3, tags: ['bell'] }),
 });
