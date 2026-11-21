@@ -188,8 +188,9 @@ export function makeAppleClient({
         return { value: await parse(res) };
       });
       if (r.status) {
-        // 403 la cautare = limita Apple de cereri pe minut (vezi SEARCH_BLOCKED_AFTER in src/collect/worker.js).
-        if (r.status === 429 || (r.status === 403 && what === 'search')) pacer?.slow();
+        // 403 la cautare = limita Apple de cereri pe minut (vezi SEARCH_BLOCKED_AFTER in src/collect/worker.js);
+        // 403 la topuri = refuz trecator pe adresa: toate tarile fac pauza, apoi se reincearca (vezi net.js).
+        if (r.status === 429 || (r.status === 403 && (what === 'search' || what === 'rss'))) pacer?.slow();
         throw new HttpError(r.status, what);
       }
       pacer?.ok();

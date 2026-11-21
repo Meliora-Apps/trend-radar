@@ -161,6 +161,20 @@ test('client: 403 la cautare nu se reincearca, dar incetineste ritmul comun al c
   assert.deepEqual(lookup.stats(), { intervalMs: 100, pauses: 0 });
 });
 
+test('client: 403 la topuri (RSS) e un refuz trecator: se reincearca, iar toate tarile fac pauza (13 si 15 nov)', async () => {
+  const c = fakeClock();
+  const rss = makePacer(100, { pauseMs: 1000, ...c });
+  let n = 0;
+  const apple = makeAppleClient({
+    fetchImpl: async () => (++n < 3 ? { ok: false, status: 403 } : { ok: true, json: async () => ({ feed: { entry: [] } }) }),
+    pacers: { rss }, retry: makeRetry({ retries: 4, baseDelayMs: 1, sleep: c.sleep }),
+  });
+  assert.deepEqual(await apple.chart('US', 'topfreeapplications', 6014), []);
+  assert.equal(n, 3);
+  assert.equal(rss.stats().pauses, 2); // fiecare refuz = o pauza comuna
+  assert.equal(apple.counter.stats.failures, 0);
+});
+
 test('pacer cu until: cererea care ar porni dupa sfarsitul bucatii iese imediat, fara reincercare si fara sa fie numarata', async () => {
   const c = fakeClock();
   const p = makePacer(1000, { until: 2500, ...c });

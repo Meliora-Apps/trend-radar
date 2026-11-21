@@ -6,6 +6,7 @@ export class HttpError extends Error {
   constructor(status, what) {
     super(`HTTP ${status} (${what})`);
     this.status = status;
+    this.what = what;
   }
 }
 
@@ -67,7 +68,10 @@ export class OutOfTime extends Error {
   }
 }
 
-const retryable = (err) => !err.outOfTime && (!(err instanceof HttpError) || err.status === 429 || err.status >= 500);
+// 403 la topuri (RSS) = refuz trecator al Apple, cateva zeci de secunde, pe toate tarile (13 si 15 nov 2026): se
+// reincearca. 403 la cautare NU (e limita pe minut; vezi SEARCH_BLOCKED_AFTER), nici la celelalte.
+const retryable = (err) => !err.outOfTime
+  && (!(err instanceof HttpError) || err.status === 429 || err.status >= 500 || (err.status === 403 && err.what === 'rss'));
 
 // La 429/5xx/eroare de retea: pauza 30s, 60s, 120s... (max 10 min), maxim `retries` reincercari.
 // `rateLimitDelayMs`: pauza dupa un 429 (implicit ca la celelalte); 0 cand un pacer comun face deja pauza.
