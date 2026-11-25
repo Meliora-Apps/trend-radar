@@ -22,13 +22,20 @@ let refreshing = null;
 async function refresh() {
   const refreshToken = store.get(KEY.refresh);
   if (!refreshToken) return false;
+  // Fara tokenul expirat atasat: Convex respinge orice cerere cu un JWT expirat (si reimprospatarea).
+  client.clearAuth();
   refreshing ??= client.action('auth:signIn', { refreshToken })
     .then((r) => { setTokens(r.tokens ?? null); return !!r.tokens; })
-    .catch(() => { setTokens(null); return false; })
+    // Eroare de retea: pastram tokenul de reimprospatare pentru urmatoarea incercare.
+    .catch(() => { const jwt = store.get(KEY.jwt); if (jwt) client.setAuth(jwt); return false; })
     .finally(() => { refreshing = null; });
   return refreshing;
 }
-const authError = (err) => /NOT_ALLOWED|Unauthenticated|token|expired|auth/i.test(String(err?.data ?? err?.message ?? err));
+// Expirarea tokenului (ms); 0 daca lipseste sau nu se poate citi.
+function jwtExp(jwt) {
+  try { return JSON.parse(atob(jwt.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))).exp * 1000 || 0; } catch { return 0; }
+}
+const authError =(err) => /NOT_ALLOWED|Unauthenticated|token|expired|auth/i.test(String(err?.data ?? err?.message ?? err));
 const withAuth = (call) => async (name, args) => {
   try { return await call(name, args); } catch (err) {
     if (!authError(err) || !(await refresh())) throw err;
@@ -91,10 +98,16 @@ async function start() {
   } else if (store.get(KEY.jwt)) {
     client.setAuth(store.get(KEY.jwt));
   }
+  // Tokenul (1h) expirat sau pe terminate: il reimprospatam inainte de prima cerere.
+  if (store.get(KEY.refresh) && jwtExp(store.get(KEY.jwt)) < Date.now() + 60000) await refresh();
 
   let me = null;
-  if (store.get(KEY.jwt) || store.get(KEY.refresh)) me = await convex.query('data:me', {}).catch(() => null);
+  let offline = false;
+  if (store.get(KEY.jwt) || store.get(KEY.refresh)) {
+    me = await convex.query('data:me', {}).catch((err) => { offline = !authError(err); return null; });
+  }
   if (!me?.email) {
+    if (offline) return loginScreen('Serverul nu răspunde acum. Reîncarcă pagina peste câteva secunde.');
     setTokens(null);
     return loginScreen(pending || code ? 'Logarea nu a mers: emailul tău nu e pe lista de acces.' : '');
   }
